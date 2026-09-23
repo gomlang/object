@@ -1,0 +1,201 @@
+package elf;
+
+use std::bytes;
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum Class {
+    Elf32,
+    Elf64,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum Endian {
+    Little,
+    Big,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum Error {
+    InvalidMagic,
+    UnsupportedClass,
+    UnsupportedEndian,
+    UnsupportedVersion,
+    Truncated,
+    InvalidRange(string),
+    InvalidStructure(string),
+    InvalidName,
+    LimitExceeded(string),
+}
+
+impl ToString for Error {
+    fn to_string(self: Error) -> string {
+        match self {
+            Error::InvalidMagic => "invalid ELF magic",
+            Error::UnsupportedClass => "unsupported ELF class",
+            Error::UnsupportedEndian => "unsupported ELF byte order",
+            Error::UnsupportedVersion => "unsupported ELF version",
+            Error::Truncated => "truncated ELF data",
+            Error::InvalidRange(kind) => "invalid ELF range: " + kind,
+            Error::InvalidStructure(kind) => "invalid ELF structure: " + kind,
+            Error::InvalidName => "invalid ELF name string",
+            Error::LimitExceeded(kind) => "ELF resource limit exceeded: " + kind,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct Limits {
+    pub max_file_bytes: isize,
+    pub max_sections: isize,
+    pub max_programs: isize,
+    pub max_symbols: isize,
+    pub max_name_bytes: isize,
+    pub max_section_bytes: isize,
+}
+
+impl Limits {
+    pub fn standard() -> Limits {
+        Limits {
+            max_file_bytes: 67108864,
+            max_sections: 131072,
+            max_programs: 8192,
+            max_symbols: 1000000,
+            max_name_bytes: 4096,
+            max_section_bytes: 33554432,
+        }
+    }
+
+    pub fn validate(self: Limits) -> Result[(), Error] {
+        if self.max_file_bytes < 0 || self.max_sections < 0 || self.max_programs < 0
+            || self.max_symbols < 0
+            || self.max_name_bytes < 0
+            || self.max_section_bytes < 0 {
+            Result::Err(Error::LimitExceeded("negative limit"))
+        } else {
+            Result::Ok(())
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct Header {
+    pub class: Class,
+    pub endian: Endian,
+    pub file_type: u16,
+    pub machine: u16,
+    pub entry: u64,
+    pub flags: u32,
+    pub section_count: isize,
+    pub program_count: isize,
+    pub section_name_index: isize,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct Section {
+    pub index: isize,
+    pub name: string,
+    pub kind: u32,
+    pub flags: u64,
+    pub address: u64,
+    pub offset: u64,
+    pub size: u64,
+    pub link: u32,
+    pub info: u32,
+    pub alignment: u64,
+    pub entry_size: u64,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct Program {
+    pub index: isize,
+    pub kind: u32,
+    pub flags: u32,
+    pub offset: u64,
+    pub virtual_address: u64,
+    pub physical_address: u64,
+    pub file_size: u64,
+    pub memory_size: u64,
+    pub alignment: u64,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub struct Symbol {
+    pub name: string,
+    pub info: byte,
+    pub other: byte,
+    pub section_index: u32,
+    pub value: u64,
+    pub size: u64,
+    pub table_section: isize,
+}
+
+pub struct File {
+    header_value: Header,
+    data: bytes::Bytes,
+    sections_value: FrozenVec[Section],
+    programs_value: FrozenVec[Program],
+    static_symbols_value: FrozenVec[Symbol],
+    dynamic_symbols_value: FrozenVec[Symbol],
+}
+
+impl File {
+    pub fn header(self: File) -> Header {
+        self.header_value
+    }
+
+    pub fn sections(self: File) -> Vec[Section] {
+        self.sections_value.to_vec()
+    }
+
+    pub fn programs(self: File) -> Vec[Program] {
+        self.programs_value.to_vec()
+    }
+
+    pub fn symbols(self: File) -> Vec[Symbol] {
+        self.static_symbols_value.to_vec()
+    }
+
+    pub fn dynamic_symbols(self: File) -> Vec[Symbol] {
+        self.dynamic_symbols_value.to_vec()
+    }
+
+    pub fn section(self: File, index: isize) -> Option[Section] {
+        if index < 0 || index >= self.sections_value.len() {
+            Option::None
+        } else {
+            Option::Some(self.sections_value.get(index))
+        }
+    }
+
+    pub fn section_by_name(self: File, name: string) -> Option[Section] {
+        for section in self.sections_value.iter() {
+            if section.name == name {
+                return Option::Some(section)
+            }
+        }
+        Option::None
+    }
+
+    pub fn section_data(self: File, index: isize) -> Result[bytes::Bytes, Error] {
+        let section = match self.section(index) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidRange("section index")),
+        };
+        if section.kind == 0 || section.kind == 8 {
+            return Result::Ok(bytes::Bytes::new())
+        }
+        let start = section.offset.to_isize();
+        let end = start + section.size.to_isize();
+        Result::Ok(bytes::Bytes::from_slice_copy(self.data.slice(start, end)))
+    }
+
+    pub fn program_data(self: File, index: isize) -> Result[bytes::Bytes, Error] {
+        if index < 0 || index >= self.programs_value.len() {
+            return Result::Err(Error::InvalidRange("program index"))
+        }
+        let program = self.programs_value.get(index);
+        let start = program.offset.to_isize();
+        let end = start + program.file_size.to_isize();
+        Result::Ok(bytes::Bytes::from_slice_copy(self.data.slice(start, end)))
+    }
+}

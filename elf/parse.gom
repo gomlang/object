@@ -1,0 +1,525 @@
+package elf;
+
+use std::bytes;
+
+struct RawSection {
+    value: Section,
+    name_offset: u32,
+}
+
+fn in_range(length: u64, offset: u64, size: u64) -> bool {
+    offset <= length && size <= length - offset
+}
+
+fn read_number(data: Slice[byte], offset: u64, width: isize, endian: Endian) -> Result[u64, Error] {
+    if !in_range(data.len().to_u64(), offset, width.to_u64()) {
+        return Result::Err(Error::Truncated)
+    }
+    let mut value: u64 = 0;
+    if endian == Endian::Little {
+        for index in 0..width {
+            value = value | (data[offset.to_isize() + index].to_u64() << (index * 8));
+        }
+    } else {
+        for index in 0..width {
+            value = (value << 8) | data[offset.to_isize() + index].to_u64();
+        }
+    }
+    Result::Ok(value)
+}
+
+fn table_range(
+    data: Slice[byte],
+    offset: u64,
+    count: isize,
+    entry_size: u64,
+    minimum: u64,
+    kind: string,
+) -> Result[(), Error] {
+    if count == 0 {
+        return Result::Ok(())
+    }
+    if offset == 0 || entry_size < minimum {
+        return Result::Err(Error::InvalidStructure(kind))
+    }
+    let length = data.len().to_u64();
+    if offset > length || count.to_u64() > (length - offset) / entry_size {
+        return Result::Err(Error::InvalidRange(kind))
+    }
+    Result::Ok(())
+}
+
+fn raw_section(data: Slice[byte], offset: u64, class: Class, endian: Endian, index: isize) -> Result[
+    RawSection,
+    Error,
+] {
+    let name_offset = read_number(data, offset, 4, endian)?.to_u32();
+    let kind = read_number(data, offset + 4, 4, endian)?.to_u32();
+    let (flags, address, section_offset, size, link_offset, info_offset, align_offset, entry_offset) = if class
+        == Class::Elf32 {
+        (
+            read_number(data, offset + 8, 4, endian)?,
+            read_number(data, offset + 12, 4, endian)?,
+            read_number(data, offset + 16, 4, endian)?,
+            read_number(data, offset + 20, 4, endian)?,
+            24,
+            28,
+            32,
+            36,
+        )
+    } else {
+        (
+            read_number(data, offset + 8, 8, endian)?,
+            read_number(data, offset + 16, 8, endian)?,
+            read_number(data, offset + 24, 8, endian)?,
+            read_number(data, offset + 32, 8, endian)?,
+            40,
+            44,
+            48,
+            56,
+        )
+    };
+    Result::Ok(
+        RawSection {
+            value: Section {
+                index,
+                name: "",
+                kind,
+                flags,
+                address,
+                offset: section_offset,
+                size,
+                link: read_number(data, offset + link_offset, 4, endian)?.to_u32(),
+                info: read_number(data, offset + info_offset, 4, endian)?.to_u32(),
+                alignment: read_number(
+                    data,
+                    offset + align_offset,
+                    if class == Class::Elf32 {
+                        4
+                    } else {
+                        8
+                    },
+                    endian,
+                )?,
+                entry_size: read_number(
+                    data,
+                    offset + entry_offset,
+                    if class == Class::Elf32 {
+                        4
+                    } else {
+                        8
+                    },
+                    endian,
+                )?,
+            },
+            name_offset,
+        },
+    )
+}
+
+fn program(data: Slice[byte], offset: u64, class: Class, endian: Endian, index: isize) -> Result[
+    Program,
+    Error,
+] {
+    let kind = read_number(data, offset, 4, endian)?.to_u32();
+    let (flags, file_offset, virtual_address, physical_address, file_size, memory_size, alignment) = if class
+        == Class::Elf32 {
+        (
+            read_number(data, offset + 24, 4, endian)?.to_u32(),
+            read_number(data, offset + 4, 4, endian)?,
+            read_number(data, offset + 8, 4, endian)?,
+            read_number(data, offset + 12, 4, endian)?,
+            read_number(data, offset + 16, 4, endian)?,
+            read_number(data, offset + 20, 4, endian)?,
+            read_number(data, offset + 28, 4, endian)?,
+        )
+    } else {
+        (
+            read_number(data, offset + 4, 4, endian)?.to_u32(),
+            read_number(data, offset + 8, 8, endian)?,
+            read_number(data, offset + 16, 8, endian)?,
+            read_number(data, offset + 24, 8, endian)?,
+            read_number(data, offset + 32, 8, endian)?,
+            read_number(data, offset + 40, 8, endian)?,
+            read_number(data, offset + 48, 8, endian)?,
+        )
+    };
+    Result::Ok(
+        Program {
+            index,
+            kind,
+            flags,
+            offset: file_offset,
+            virtual_address,
+            physical_address,
+            file_size,
+            memory_size,
+            alignment,
+        },
+    )
+}
+
+fn name_from_table(data: Slice[byte], table: Section, name_offset: u32, limits: Limits) -> Result[
+    string,
+    Error,
+] {
+    if name_offset == 0 {
+        return Result::Ok("")
+    }
+    if name_offset.to_u64() >= table.size {
+        return Result::Err(Error::InvalidName)
+    }
+    let start = table.offset + name_offset.to_u64();
+    let end = table.offset + table.size;
+    let raw = Vec::new();
+    let mut position = start;
+    while position < end {
+        let item = data[position.to_isize()];
+        if item == 0 {
+            let (valid, value) = string_from_utf8(raw);
+            if !valid {
+                return Result::Err(Error::InvalidName)
+            }
+            return Result::Ok(value)
+        }
+        if raw.len() >= limits.max_name_bytes {
+            return Result::Err(Error::LimitExceeded("name bytes"))
+        }
+        raw.push(item);
+        position += 1;
+    }
+    Result::Err(Error::InvalidName)
+}
+
+fn parse_symbols(
+    data: Slice[byte],
+    sections: Vec[Section],
+    class: Class,
+    endian: Endian,
+    limits: Limits,
+) -> Result[(Vec[Symbol], Vec[Symbol]), Error] {
+    let regular = Vec::new();
+    let dynamic = Vec::new();
+    let entry_minimum = if class == Class::Elf32 {
+        16
+    } else {
+        24
+    };
+    let mut total = 0;
+    let extended_by_table: Vec[Option[Section]] = Vec::with_capacity(sections.len());
+    for _ in 0..sections.len() {
+        extended_by_table.push(Option::None);
+    }
+    for candidate in sections {
+        if candidate.kind == 18 && candidate.link.to_isize() < sections.len() {
+            extended_by_table.set(candidate.link.to_isize(), Option::Some(candidate));
+        }
+    }
+    for section in sections {
+        if section.kind != 2 && section.kind != 11 {
+            continue
+        }
+        if section.link.to_isize() >= sections.len() || sections[section.link.to_isize()].kind != 3 {
+            return Result::Err(Error::InvalidStructure("symbol string table link"))
+        }
+        if section.entry_size < entry_minimum || section.size % section.entry_size != 0 {
+            return Result::Err(Error::InvalidStructure("symbol entry size"))
+        }
+        let count = section.size / section.entry_size;
+        if count > (limits.max_symbols - total).to_u64() {
+            return Result::Err(Error::LimitExceeded("symbols"))
+        }
+        total += count.to_isize();
+        let extended = extended_by_table[section.index];
+        if let Some(table) = extended {
+            if table.size != count * 4 {
+                return Result::Err(Error::InvalidStructure("extended symbol indexes"))
+            }
+        }
+        for symbol_index in 1..count.to_isize() {
+            let offset = section.offset + symbol_index.to_u64() * section.entry_size;
+            let name_offset = read_number(data, offset, 4, endian)?.to_u32();
+            let (value, size, info, other, short_index) = if class == Class::Elf32 {
+                (
+                    read_number(data, offset + 4, 4, endian)?,
+                    read_number(data, offset + 8, 4, endian)?,
+                    read_number(data, offset + 12, 1, endian)?.to_u8(),
+                    read_number(data, offset + 13, 1, endian)?.to_u8(),
+                    read_number(data, offset + 14, 2, endian)?.to_u32(),
+                )
+            } else {
+                (
+                    read_number(data, offset + 8, 8, endian)?,
+                    read_number(data, offset + 16, 8, endian)?,
+                    read_number(data, offset + 4, 1, endian)?.to_u8(),
+                    read_number(data, offset + 5, 1, endian)?.to_u8(),
+                    read_number(data, offset + 6, 2, endian)?.to_u32(),
+                )
+            };
+            let section_index = if short_index == 65535 {
+                match extended {
+                    Some(table) => read_number(
+                        data,
+                        table.offset + symbol_index.to_u64() * 4,
+                        4,
+                        endian,
+                    )?.to_u32(),
+                    None => return Result::Err(
+                        Error::InvalidStructure("missing extended symbol indexes"),
+                    ),
+                }
+            } else {
+                short_index
+            };
+            let symbol = Symbol {
+                name: name_from_table(data, sections[section.link.to_isize()], name_offset, limits)?,
+                info,
+                other,
+                section_index,
+                value,
+                size,
+                table_section: section.index,
+            };
+            if section.kind == 2 {
+                regular.push(symbol)
+            } else {
+                dynamic.push(symbol)
+            }
+        }
+    }
+    Result::Ok((regular, dynamic))
+}
+
+pub fn parse(data: Slice[byte]) -> Result[File, Error] {
+    parse_with_limits(data, Limits::standard())
+}
+
+pub fn parse_with_limits(data: Slice[byte], limits: Limits) -> Result[File, Error] {
+    limits.validate()?;
+    if data.len() > limits.max_file_bytes {
+        return Result::Err(Error::LimitExceeded("file bytes"))
+    }
+    if data.len() < 16 {
+        return Result::Err(Error::Truncated)
+    }
+    if data[0] != 0x7f || data[1] != b'E' || data[2] != b'L' || data[3] != b'F' {
+        return Result::Err(Error::InvalidMagic)
+    }
+    let class = match data[4] {
+        1 => Class::Elf32,
+        2 => Class::Elf64,
+        _ => return Result::Err(Error::UnsupportedClass),
+    };
+    let endian = match data[5] {
+        1 => Endian::Little,
+        2 => Endian::Big,
+        _ => return Result::Err(Error::UnsupportedEndian),
+    };
+    if data[6] != 1 {
+        return Result::Err(Error::UnsupportedVersion)
+    }
+    let header_size = if class == Class::Elf32 {
+        52
+    } else {
+        64
+    };
+    let section_size = if class == Class::Elf32 {
+        40
+    } else {
+        64
+    };
+    let program_size = if class == Class::Elf32 {
+        32
+    } else {
+        56
+    };
+    if data.len() < header_size {
+        return Result::Err(Error::Truncated)
+    }
+    let file_type = read_number(data, 16, 2, endian)?.to_u16();
+    let machine = read_number(data, 18, 2, endian)?.to_u16();
+    if read_number(data, 20, 4, endian)? != 1 {
+        return Result::Err(Error::UnsupportedVersion)
+    }
+    let (entry, program_offset, section_offset, flags_offset, size_offset) = if class
+        == Class::Elf32 {
+        (
+            read_number(data, 24, 4, endian)?,
+            read_number(data, 28, 4, endian)?,
+            read_number(data, 32, 4, endian)?,
+            36,
+            40,
+        )
+    } else {
+        (
+            read_number(data, 24, 8, endian)?,
+            read_number(data, 32, 8, endian)?,
+            read_number(data, 40, 8, endian)?,
+            48,
+            52,
+        )
+    };
+    let flags = read_number(data, flags_offset, 4, endian)?.to_u32();
+    if read_number(data, size_offset, 2, endian)? < header_size.to_u64() {
+        return Result::Err(Error::InvalidStructure("ELF header size"))
+    }
+    let program_entry_size = read_number(data, size_offset + 2, 2, endian)?;
+    let program_count_raw = read_number(data, size_offset + 4, 2, endian)?;
+    let section_entry_size = read_number(data, size_offset + 6, 2, endian)?;
+    let section_count_raw = read_number(data, size_offset + 8, 2, endian)?;
+    let section_name_raw = read_number(data, size_offset + 10, 2, endian)?;
+    let needs_zero = (section_count_raw == 0 && section_offset != 0) || section_name_raw == 65535
+        || program_count_raw == 65535;
+    let zero = if needs_zero {
+        if section_offset == 0 {
+            return Result::Err(Error::InvalidStructure("missing section zero"))
+        }
+        table_range(data, section_offset, 1, section_entry_size, section_size, "section table")?;
+        let value = raw_section(data, section_offset, class, endian, 0)?.value;
+        if value.kind != 0 {
+            return Result::Err(Error::InvalidStructure("section zero type"))
+        }
+        Option::Some(value)
+    } else {
+        Option::None
+    };
+    let section_count = if section_count_raw == 0 && section_offset != 0 {
+        match zero {
+            Some(value) => {
+                if value.size < 65280 {
+                    return Result::Err(Error::InvalidStructure("extended section count"))
+                }
+                value.size
+            },
+            None => 0,
+        }
+    } else {
+        section_count_raw
+    };
+    let program_count = if program_count_raw == 65535 {
+        match zero {
+            Some(value) => {
+                if value.info < 65535 {
+                    return Result::Err(Error::InvalidStructure("extended program count"))
+                }
+                value.info.to_u64()
+            },
+            None => 0,
+        }
+    } else {
+        program_count_raw
+    };
+    let section_name_index = if section_name_raw == 65535 {
+        match zero {
+            Some(value) => {
+                if value.link < 65280 {
+                    return Result::Err(Error::InvalidStructure("extended section name index"))
+                }
+                value.link.to_u64()
+            },
+            None => 0,
+        }
+    } else {
+        section_name_raw
+    };
+    if section_count > limits.max_sections.to_u64() {
+        return Result::Err(Error::LimitExceeded("sections"))
+    }
+    if program_count > limits.max_programs.to_u64() {
+        return Result::Err(Error::LimitExceeded("programs"))
+    }
+    if section_count == 0 && section_offset != 0 {
+        return Result::Err(Error::InvalidStructure("section count"))
+    }
+    table_range(
+        data,
+        section_offset,
+        section_count.to_isize(),
+        section_entry_size,
+        section_size,
+        "section table",
+    )?;
+    table_range(
+        data,
+        program_offset,
+        program_count.to_isize(),
+        program_entry_size,
+        program_size,
+        "program table",
+    )?;
+    let raw_sections = Vec::with_capacity(section_count.to_isize());
+    for index in 0..section_count.to_isize() {
+        let value = raw_section(
+            data,
+            section_offset + index.to_u64() * section_entry_size,
+            class,
+            endian,
+            index,
+        )?;
+        if value.value.kind != 0 && value.value.kind != 8 {
+            if value.value.size > limits.max_section_bytes.to_u64() {
+                return Result::Err(Error::LimitExceeded("section bytes"))
+            }
+            if !in_range(data.len().to_u64(), value.value.offset, value.value.size) {
+                return Result::Err(Error::InvalidRange("section data"))
+            }
+        }
+        raw_sections.push(value)
+    }
+    if section_name_index >= section_count && section_name_index != 0 {
+        return Result::Err(Error::InvalidStructure("section name index"))
+    }
+    let names = if section_name_index == 0 {
+        Option::None
+    } else {
+        let table = raw_sections[section_name_index.to_isize()].value;
+        if table.kind != 3 {
+            return Result::Err(Error::InvalidStructure("section name table"))
+        }
+        Option::Some(table)
+    };
+    let sections = Vec::with_capacity(raw_sections.len());
+    for raw in raw_sections {
+        let mut value = raw.value;
+        value.name = match names {
+            Some(table) => name_from_table(data, table, raw.name_offset, limits)?,
+            None => "",
+        };
+        sections.push(value)
+    }
+    let programs = Vec::with_capacity(program_count.to_isize());
+    for index in 0..program_count.to_isize() {
+        let value = program(
+            data,
+            program_offset + index.to_u64() * program_entry_size,
+            class,
+            endian,
+            index,
+        )?;
+        if !in_range(data.len().to_u64(), value.offset, value.file_size) {
+            return Result::Err(Error::InvalidRange("program data"))
+        }
+        programs.push(value)
+    }
+    let (regular, dynamic) = parse_symbols(data, sections, class, endian, limits)?;
+    Result::Ok(
+        File {
+            header_value: Header {
+                class,
+                endian,
+                file_type,
+                machine,
+                entry,
+                flags,
+                section_count: section_count.to_isize(),
+                program_count: program_count.to_isize(),
+                section_name_index: section_name_index.to_isize(),
+            },
+            data: bytes::Bytes::from_slice_copy(data),
+            sections_value: sections.freeze(),
+            programs_value: programs.freeze(),
+            static_symbols_value: regular.freeze(),
+            dynamic_symbols_value: dynamic.freeze(),
+        },
+    )
+}
