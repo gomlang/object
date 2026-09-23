@@ -1,0 +1,303 @@
+package tests;
+
+use ecosystem::object::elf;
+use elf::{Class, Endian, Error, Limits};
+use std::bytes;
+use std::fs;
+use std::testing;
+
+fn fixture() -> bytes::Bytes {
+    testing::expect_ok(fs::read_bytes_structured("elf/tests/data/elf64le.bin"), "ELF fixture")
+}
+
+fn set_number(data: bytes::Bytes, offset: isize, value: u64, width: isize) -> () {
+    for index in 0..width {
+        data.set(offset + index, (value >> (index * 8).to_u64()).to_u8())
+    }
+}
+
+fn get_number(data: bytes::Bytes, offset: isize, width: isize) -> u64 {
+    let mut value: u64 = 0;
+    for index in 0..width {
+        value |= data.get(offset + index).to_u64() << (index * 8).to_u64();
+    }
+    value
+}
+
+#[test]
+fn elf64_sections_programs_symbols_and_owned_data() -> () {
+    let raw = fixture();
+    let file = testing::expect_ok(elf::parse(raw.as_slice()), "ELF64 parse");
+    let header = file.header();
+    testing::assert_eq(header.class, Class::Elf64);
+    testing::assert_eq(header.endian, Endian::Little);
+    testing::assert_eq(header.machine, 62);
+    testing::assert_eq(header.entry, 0x400000);
+    testing::assert_eq(header.section_count, 5);
+    testing::assert_eq(header.program_count, 1);
+    testing::assert_eq(header.section_name_index, 4);
+    testing::assert_eq(file.sections()[1].name, ".text");
+    testing::assert_eq(
+        testing::expect_some(file.section_by_name(".symtab"), "symbol section").index,
+        2,
+    );
+    testing::assert_eq(file.programs()[0].virtual_address, 0x400000);
+    testing::assert_eq(file.symbols().len(), 2);
+    testing::assert_eq(file.symbols()[0].name, "main");
+    testing::assert_eq(file.symbols()[1].name, "helper");
+    testing::assert_eq(file.symbols()[0].section_index, 1);
+    testing::assert_eq(file.dynamic_symbols().len(), 0);
+    let text = testing::expect_ok(file.section_data(1), "text bytes");
+    testing::assert_eq(text.get(0), 0x90);
+    testing::assert_eq(text.get(1), 0xc3);
+    testing::assert_eq(testing::expect_ok(file.program_data(0), "program bytes").len(), 2);
+    raw.set(128, 0);
+    testing::assert_eq(testing::expect_ok(file.section_data(1), "detached bytes").get(0), 0x90);
+    text.set(0, 0);
+    testing::assert_eq(testing::expect_ok(file.section_data(1), "fresh bytes").get(0), 0x90);
+    let sections = file.sections();
+    sections[1].name = "changed";
+    testing::assert_eq(file.sections()[1].name, ".text");
+    testing::assert_eq(
+        testing::expect_err(file.section_data(-1), "section index"),
+        Error::InvalidRange("section index"),
+    );
+    testing::assert_eq(
+        testing::expect_err(file.program_data(1), "program index"),
+        Error::InvalidRange("program index"),
+    );
+}
+
+#[test]
+fn malformed_inputs_are_recoverable() -> () {
+    let source = fixture();
+    for size in 0..64 {
+        testing::assert_err(elf::parse(source.slice(0, size)));
+    }
+    let bad_magic = bytes::Bytes::from_slice_copy(source.as_slice());
+    bad_magic.set(0, 0);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_magic.as_slice()), "magic"),
+        Error::InvalidMagic,
+    );
+    let bad_class = bytes::Bytes::from_slice_copy(source.as_slice());
+    bad_class.set(4, 3);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_class.as_slice()), "class"),
+        Error::UnsupportedClass,
+    );
+    let bad_endian = bytes::Bytes::from_slice_copy(source.as_slice());
+    bad_endian.set(5, 3);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_endian.as_slice()), "endian"),
+        Error::UnsupportedEndian,
+    );
+    let bad_version = bytes::Bytes::from_slice_copy(source.as_slice());
+    bad_version.set(6, 0);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_version.as_slice()), "version"),
+        Error::UnsupportedVersion,
+    );
+    let section_outside = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(section_outside, 40, 0xffffffffffffffff, 8);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(section_outside.as_slice()), "section range"),
+        Error::InvalidRange("section table"),
+    );
+    let bad_entry = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(bad_entry, 58, 1, 2);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_entry.as_slice()), "section entry"),
+        Error::InvalidStructure("section table"),
+    );
+    let bad_name = bytes::Bytes::from_slice_copy(source.as_slice());
+    let section_offset = get_number(bad_name, 40, 8).to_isize();
+    set_number(bad_name, section_offset + 64, 0xffff, 4);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_name.as_slice()), "name"),
+        Error::InvalidName,
+    );
+    let bad_symbol_link = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(bad_symbol_link, section_offset + 2 * 64 + 40, 1, 4);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_symbol_link.as_slice()), "symbol link"),
+        Error::InvalidStructure("symbol string table link"),
+    );
+    let bad_program = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(bad_program, 64 + 8, 0xffffffffffffffff, 8);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(bad_program.as_slice()), "program range"),
+        Error::InvalidRange("program data"),
+    );
+}
+
+#[test]
+fn explicit_limits_apply_before_large_work() -> () {
+    let source = fixture();
+    let mut limits = Limits::standard();
+    limits.max_file_bytes = source.len() - 1;
+    testing::assert_eq(
+        testing::expect_err(elf::parse_with_limits(source.as_slice(), limits), "file limit"),
+        Error::LimitExceeded("file bytes"),
+    );
+    limits = Limits::standard();
+    limits.max_sections = 4;
+    testing::assert_eq(
+        testing::expect_err(elf::parse_with_limits(source.as_slice(), limits), "section limit"),
+        Error::LimitExceeded("sections"),
+    );
+    limits = Limits::standard();
+    limits.max_programs = 0;
+    testing::assert_eq(
+        testing::expect_err(elf::parse_with_limits(source.as_slice(), limits), "program limit"),
+        Error::LimitExceeded("programs"),
+    );
+    limits = Limits::standard();
+    limits.max_symbols = 2;
+    testing::assert_eq(
+        testing::expect_err(elf::parse_with_limits(source.as_slice(), limits), "symbol limit"),
+        Error::LimitExceeded("symbols"),
+    );
+    limits = Limits::standard();
+    limits.max_name_bytes = 3;
+    testing::assert_eq(
+        testing::expect_err(elf::parse_with_limits(source.as_slice(), limits), "name limit"),
+        Error::LimitExceeded("name bytes"),
+    );
+    limits = Limits::standard();
+    limits.max_section_bytes = 1;
+    testing::assert_eq(
+        testing::expect_err(elf::parse_with_limits(source.as_slice(), limits), "section byte limit"),
+        Error::LimitExceeded("section bytes"),
+    );
+    limits = Limits::standard();
+    limits.max_sections = -1;
+    testing::assert_eq(
+        testing::expect_err(elf::parse_with_limits(source.as_slice(), limits), "invalid limit"),
+        Error::LimitExceeded("negative limit"),
+    );
+}
+
+#[test]
+fn extended_section_and_name_numbering() -> () {
+    let source = fixture();
+    let expanded = bytes::Bytes::from_slice_copy(source.as_slice());
+    let section_offset = get_number(expanded, 40, 8).to_isize();
+    set_number(expanded, 60, 0, 2);
+    set_number(expanded, 62, 65535, 2);
+    set_number(expanded, section_offset + 32, 65281, 8);
+    set_number(expanded, section_offset + 40, 65280, 4);
+    for index in 5..65281 {
+        if index == 65280 {
+            expanded.extend_from_slice(
+                source.slice(section_offset + 4 * 64, section_offset + 5 * 64),
+            );
+        } else {
+            for _ in 0..64 {
+                expanded.push(0);
+            }
+        }
+    }
+    let file = testing::expect_ok(elf::parse(expanded.as_slice()), "extended ELF counts");
+    testing::assert_eq(file.header().section_count, 65281);
+    testing::assert_eq(file.header().section_name_index, 65280);
+    testing::assert_eq(file.header().program_count, 1);
+    testing::assert_eq(file.sections()[1].name, ".text");
+    testing::assert_eq(file.sections()[65280].name, ".shstrtab");
+    testing::assert_eq(file.symbols()[0].name, "main");
+}
+
+#[test]
+fn extended_program_numbering_with_explicit_limit() -> () {
+    let source = fixture();
+    let expanded = bytes::Bytes::from_slice_copy(source.as_slice());
+    let section_offset = get_number(expanded, 40, 8).to_isize();
+    set_number(expanded, 32, source.len().to_u64(), 8);
+    set_number(expanded, 56, 65535, 2);
+    set_number(expanded, section_offset + 44, 65535, 4);
+    expanded.extend_from_slice(source.slice(64, 120));
+    for _ in 1..65535 {
+        for _ in 0..56 {
+            expanded.push(0);
+        }
+    }
+    let mut limits = Limits::standard();
+    limits.max_programs = 65535;
+    let file = testing::expect_ok(
+        elf::parse_with_limits(expanded.as_slice(), limits),
+        "extended program count",
+    );
+    testing::assert_eq(file.header().program_count, 65535);
+    testing::assert_eq(file.programs()[0].kind, 1);
+    testing::assert_eq(file.programs()[65534].kind, 0);
+}
+
+#[test]
+fn noncanonical_extended_numbering_is_rejected() -> () {
+    let source = fixture();
+    let section_offset = get_number(source, 40, 8).to_isize();
+    let small_sections = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(small_sections, 60, 0, 2);
+    set_number(small_sections, section_offset + 32, 5, 8);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(small_sections.as_slice()), "small section escape"),
+        Error::InvalidStructure("extended section count"),
+    );
+    let small_name = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(small_name, 62, 65535, 2);
+    set_number(small_name, section_offset + 40, 4, 4);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(small_name.as_slice()), "small name escape"),
+        Error::InvalidStructure("extended section name index"),
+    );
+    let small_programs = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(small_programs, 56, 65535, 2);
+    set_number(small_programs, section_offset + 44, 1, 4);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(small_programs.as_slice()), "small program escape"),
+        Error::InvalidStructure("extended program count"),
+    );
+    let wrong_zero = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(wrong_zero, 60, 0, 2);
+    set_number(wrong_zero, section_offset + 4, 1, 4);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(wrong_zero.as_slice()), "non-null section zero"),
+        Error::InvalidStructure("section zero type"),
+    );
+}
+
+#[test]
+fn extended_symbol_indexes_and_dynamic_symbols() -> () {
+    let source = fixture();
+    let section_offset = get_number(source, 40, 8).to_isize();
+    let symbol_offset = get_number(source, section_offset + 2 * 64 + 24, 8).to_isize();
+    let missing = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(missing, symbol_offset + 24 + 6, 65535, 2);
+    testing::assert_eq(
+        testing::expect_err(elf::parse(missing.as_slice()), "missing extended indexes"),
+        Error::InvalidStructure("missing extended symbol indexes"),
+    );
+    let extended = bytes::Bytes::from_slice_copy(missing.as_slice());
+    set_number(extended, 60, 6, 2);
+    for _ in 0..64 {
+        extended.push(0);
+    }
+    let companion = source.len();
+    set_number(extended, section_offset + 5 * 64 + 4, 18, 4);
+    set_number(extended, section_offset + 5 * 64 + 24, (companion + 64).to_u64(), 8);
+    set_number(extended, section_offset + 5 * 64 + 32, 12, 8);
+    set_number(extended, section_offset + 5 * 64 + 40, 2, 4);
+    set_number(extended, section_offset + 5 * 64 + 56, 4, 8);
+    for _ in 0..12 {
+        extended.push(0);
+    }
+    set_number(extended, companion + 64 + 4, 1, 4);
+    let parsed = testing::expect_ok(elf::parse(extended.as_slice()), "extended symbol indexes");
+    testing::assert_eq(parsed.symbols()[0].section_index, 1);
+    let dynamic = bytes::Bytes::from_slice_copy(source.as_slice());
+    set_number(dynamic, section_offset + 2 * 64 + 4, 11, 4);
+    let parsed_dynamic = testing::expect_ok(elf::parse(dynamic.as_slice()), "dynamic symbols");
+    testing::assert_eq(parsed_dynamic.symbols().len(), 0);
+    testing::assert_eq(parsed_dynamic.dynamic_symbols().len(), 2);
+    testing::assert_eq(parsed_dynamic.dynamic_symbols()[1].name, "helper");
+}
