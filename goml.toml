@@ -1,0 +1,5 @@
+[module]
+path = "consumer::object"
+
+[dependencies]
+"ecosystem::object" = "0.1.0"

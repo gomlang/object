@@ -1,0 +1,4 @@
+elf32le.bin	1	1	2	3	4194304	5	1	,.text,.symtab,.strtab,.shstrtab	1	main:4194304:2:1,helper:4194305:1:1
+elf32be.bin	1	2	2	3	4194304	5	1	,.text,.symtab,.strtab,.shstrtab	1	main:4194304:2:1,helper:4194305:1:1
+elf64le.bin	2	1	2	62	4194304	5	1	,.text,.symtab,.strtab,.shstrtab	1	main:4194304:2:1,helper:4194305:1:1
+elf64be.bin	2	2	2	62	4194304	5	1	,.text,.symtab,.strtab,.shstrtab	1	main:4194304:2:1,helper:4194305:1:1

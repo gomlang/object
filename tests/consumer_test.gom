@@ -1,0 +1,8 @@
+package tests;
+
+use consumer::object as app;
+
+#[test]
+fn external_object_package_api() -> () {
+    app::exercise();
+}
