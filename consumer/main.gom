@@ -1,0 +1,22 @@
+package main;
+
+use ecosystem::object::elf;
+use std::fs;
+use std::testing;
+
+pub fn exercise() -> () {
+    let raw = testing::expect_ok(
+        fs::read_bytes_structured("tests/data/elf64le.bin"),
+        "ELF consumer fixture",
+    );
+    let file = testing::expect_ok(elf::parse(raw.as_slice()), "ELF consumer parse");
+    testing::assert_eq(file.header().entry, 0x400000);
+    testing::assert_eq(testing::expect_some(file.section_by_name(".text"), "text section").size, 2);
+    testing::assert_eq(file.symbols()[0].name, "main");
+    testing::assert_eq(file.programs()[0].kind, 1);
+}
+
+fn main() -> () {
+    exercise();
+    println("object consumer: ELF sections, programs and symbols passed");
+}

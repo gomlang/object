@@ -1,0 +1,77 @@
+package tests;
+
+use ecosystem::object::elf;
+use elf::{Class, Endian};
+use std::fs;
+use std::testing;
+
+#[test]
+fn go_126_debug_elf_reference() -> () {
+    let source = testing::expect_ok(
+        fs::read_file_structured("tests/data/reference.tsv"),
+        "Go debug/elf reference",
+    );
+    let mut cases = 0;
+    for line in source.split("\n") {
+        if line == "" {
+            continue;
+        }
+        let fields = line.split("\t");
+        testing::assert_eq(fields.len(), 11);
+        let raw = testing::expect_ok(
+            fs::read_bytes_structured("tests/data/" + fields[0]),
+            "ELF reference input",
+        );
+        let file = testing::expect_ok(elf::parse(raw.as_slice()), "Go reference ELF parse");
+        let header = file.header();
+        testing::assert_eq(
+            if header.class == Class::Elf32 {
+                "1"
+            } else {
+                "2"
+            },
+            fields[1],
+        );
+        testing::assert_eq(
+            if header.endian == Endian::Little {
+                "1"
+            } else {
+                "2"
+            },
+            fields[2],
+        );
+        testing::assert_eq(header.file_type.to_string(), fields[3]);
+        testing::assert_eq(header.machine.to_string(), fields[4]);
+        testing::assert_eq(header.entry.to_string(), fields[5]);
+        testing::assert_eq(file.sections().len().to_string(), fields[6]);
+        testing::assert_eq(file.programs().len().to_string(), fields[7]);
+        let mut names = "";
+        for section in file.sections() {
+            if section.index > 0 {
+                names += ",";
+            }
+            names += section.name;
+        }
+        testing::assert_eq(names, fields[8]);
+        let mut programs = "";
+        for program in file.programs() {
+            if program.index > 0 {
+                programs += ",";
+            }
+            programs += program.kind.to_string();
+        }
+        testing::assert_eq(programs, fields[9]);
+        let mut symbols = "";
+        for symbol in file.symbols() {
+            if symbols != "" {
+                symbols += ",";
+            }
+            symbols += symbol.name + ":" + symbol.value.to_string() + ":" + symbol.size.to_string()
+                + ":"
+                + symbol.section_index.to_string();
+        }
+        testing::assert_eq(symbols, fields[10]);
+        cases += 1;
+    }
+    testing::assert_eq(cases, 4);
+}
