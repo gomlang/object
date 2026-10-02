@@ -6,6 +6,12 @@ The parser takes a byte slice and returns `Result[File, elf::Error]`. It validat
 
 This is a bounded metadata reader. It does not resolve relocations, decompress sections, interpret notes, or construct a dynamic linker view. `SHT_NOBITS` sections have no file-backed data, so `section_data` returns empty bytes for them.
 
+Extended symbol-index tables must link to a symbol table, use four-byte entries,
+and provide exactly one entry per symbol. Duplicate companions, nonzero unused
+entries, and escaped indexes outside the section table return `InvalidStructure`.
+These checks follow the [ELF section-table specification](https://gabi.xinuos.com/elf/03-sheader.html).
+Downstream regressions cover ELF32/ELF64 in both byte orders.
+
 Run `(cd ../verification && just ecosystem-test object)` at the repository root for module tests, example and downstream checks, and Go `debug/elf` reference vectors.
 
 ## Development and examples

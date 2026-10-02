@@ -211,8 +211,18 @@ fn parse_symbols(
         extended_by_table.push(Option::None);
     }
     for candidate in sections {
-        if candidate.kind == 18 && candidate.link.to_isize() < sections.len() {
-            extended_by_table.set(candidate.link.to_isize(), Option::Some(candidate));
+        if candidate.kind == 18 {
+            let index = candidate.link.to_isize();
+            if index >= sections.len() || (sections[index].kind != 2 && sections[index].kind != 11) {
+                return Result::Err(Error::InvalidStructure("extended symbol table link"))
+            }
+            if candidate.entry_size != 4 || candidate.size % 4 != 0 || candidate.info != 0 {
+                return Result::Err(Error::InvalidStructure("extended symbol table layout"))
+            }
+            if extended_by_table[index].is_some() {
+                return Result::Err(Error::InvalidStructure("duplicate extended symbol table"))
+            }
+            extended_by_table.set(index, Option::Some(candidate));
         }
     }
     for section in sections {
@@ -235,6 +245,9 @@ fn parse_symbols(
             if table.size != count * 4 {
                 return Result::Err(Error::InvalidStructure("extended symbol indexes"))
             }
+            if count > 0 && read_number(data, table.offset, 4, endian)? != 0 {
+                return Result::Err(Error::InvalidStructure("unused extended symbol index"))
+            }
         }
         for symbol_index in 1..count.to_isize() {
             let offset = section.offset + symbol_index.to_u64() * section.entry_size;
@@ -256,19 +269,27 @@ fn parse_symbols(
                     read_number(data, offset + 6, 2, endian)?.to_u32(),
                 )
             };
+            let extended_index = match extended {
+                Some(table) => read_number(
+                    data,
+                    table.offset + symbol_index.to_u64() * 4,
+                    4,
+                    endian,
+                )?.to_u32(),
+                None => 0,
+            };
             let section_index = if short_index == 65535 {
-                match extended {
-                    Some(table) => read_number(
-                        data,
-                        table.offset + symbol_index.to_u64() * 4,
-                        4,
-                        endian,
-                    )?.to_u32(),
-                    None => return Result::Err(
-                        Error::InvalidStructure("missing extended symbol indexes"),
-                    ),
+                if extended.is_none() {
+                    return Result::Err(Error::InvalidStructure("missing extended symbol indexes"))
                 }
+                if extended_index == 0 || extended_index.to_u64() >= sections.len().to_u64() {
+                    return Result::Err(Error::InvalidStructure("extended symbol section index"))
+                }
+                extended_index
             } else {
+                if extended_index != 0 {
+                    return Result::Err(Error::InvalidStructure("unused extended symbol index"))
+                }
                 short_index
             };
             let symbol = Symbol {
