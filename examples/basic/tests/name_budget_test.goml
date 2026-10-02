@@ -1,0 +1,72 @@
+package tests;
+
+use ecosystem::object::elf;
+use std::testing;
+
+#[test]
+fn repeated_symbol_names_charge_each_materialized_name() -> () {
+    for wide in Vec::from_array([false, true]) {
+        for big in Vec::from_array([false, true]) {
+            let data = extended_fixture(wide, big);
+            let section_size = if wide {
+                64
+            } else {
+                40
+            };
+            let symbol_size = if wide {
+                24
+            } else {
+                16
+            };
+            let size_at = if wide {
+                32
+            } else {
+                20
+            };
+            put(
+                data,
+                64 + 2 * section_size + size_at,
+                8,
+                if wide {
+                    8
+                } else {
+                    4
+                },
+                big,
+            );
+            for index in 0..6 {
+                data.set(417 + index, "shared".byte_get(index));
+            }
+            put(data, 432 + symbol_size, 1, 4, big);
+            put(data, 432 + 2 * symbol_size, 1, 4, big);
+            let limits = elf::Limits {
+                max_file_bytes: 640,
+                max_sections: 5,
+                max_programs: 0,
+                max_symbols: 3,
+                max_name_bytes: 6,
+                max_section_bytes: 128,
+            };
+            let parsed = testing::expect_ok(
+                elf::parse_with_name_budget(data.as_slice(), limits, 12),
+                "exact repeated budget",
+            );
+            testing::assert_eq(parsed.symbols()[0].name, "shared");
+            testing::assert_eq(parsed.symbols()[1].name, "shared");
+            for budget in Vec::from_array([0, 5, 6, 11]) {
+                testing::assert_eq(
+                    testing::expect_err(
+                        elf::parse_with_name_budget(data.as_slice(), limits, budget),
+                        "repeated name budget",
+                    ),
+                    elf::Error::LimitExceeded("total name bytes"),
+                );
+            }
+            testing::assert_ok(elf::parse_with_limits(data.as_slice(), limits));
+            testing::assert_err(elf::parse_with_name_budget(data.as_slice(), limits, -1));
+            testing::assert_ok(
+                elf::parse_with_name_budget(extended_fixture(wide, big).as_slice(), limits, 0),
+            );
+        }
+    }
+}

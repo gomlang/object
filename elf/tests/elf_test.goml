@@ -301,3 +301,24 @@ fn extended_symbol_indexes_and_dynamic_symbols() -> () {
     testing::assert_eq(parsed_dynamic.dynamic_symbols().len(), 2);
     testing::assert_eq(parsed_dynamic.dynamic_symbols()[1].name, "helper");
 }
+
+#[test]
+fn section_and_symbol_names_share_a_total_budget() -> () {
+    let data = fixture();
+    let parsed = testing::expect_ok(elf::parse(data.as_slice()), "fixture");
+    let mut names = 0;
+    for section in parsed.sections() {
+        names += section.name.byte_len();
+    }
+    for symbol in parsed.symbols() {
+        names += symbol.name.byte_len();
+    }
+    testing::assert_ok(elf::parse_with_name_budget(data.as_slice(), Limits::standard(), names));
+    testing::assert_eq(
+        testing::expect_err(
+            elf::parse_with_name_budget(data.as_slice(), Limits::standard(), names - 1),
+            "shared name budget",
+        ),
+        Error::LimitExceeded("total name bytes"),
+    );
+}
