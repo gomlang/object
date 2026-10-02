@@ -1,0 +1,240 @@
+package tests;
+
+use ecosystem::object::elf;
+use std::bytes;
+use std::testing;
+
+fn put(data: bytes::Bytes, offset: isize, value: u64, width: isize, big: bool) -> () {
+    for index in 0..width {
+        let shift = if big {
+            width - index - 1
+        } else {
+            index
+        };
+        data.set(offset + index, (value >> (shift * 8).to_u64()).to_u8());
+    }
+}
+
+fn extended_fixture(wide: bool, big: bool) -> bytes::Bytes {
+    let data = bytes::Bytes::new();
+    for _ in 0..640 {
+        data.push(0);
+    }
+    data.set(0, 127);
+    data.set(1, b'E');
+    data.set(2, b'L');
+    data.set(3, b'F');
+    data.set(
+        4,
+        if wide {
+            2
+        } else {
+            1
+        },
+    );
+    data.set(
+        5,
+        if big {
+            2
+        } else {
+            1
+        },
+    );
+    data.set(6, 1);
+    let word = if wide {
+        8
+    } else {
+        4
+    };
+    let header = if wide {
+        64
+    } else {
+        52
+    };
+    let section_size = if wide {
+        64
+    } else {
+        40
+    };
+    let size_at = if wide {
+        52
+    } else {
+        40
+    };
+    put(data, 20, 1, 4, big);
+    put(
+        data,
+        if wide {
+            40
+        } else {
+            32
+        },
+        64,
+        word,
+        big,
+    );
+    put(data, size_at, header, 2, big);
+    put(data, size_at + 6, section_size.to_u64(), 2, big);
+    put(data, size_at + 8, 5, 2, big);
+    let offset_at = if wide {
+        24
+    } else {
+        16
+    };
+    let size_field = if wide {
+        32
+    } else {
+        20
+    };
+    let link_at = if wide {
+        40
+    } else {
+        24
+    };
+    let entry_at = if wide {
+        56
+    } else {
+        36
+    };
+    let symbol_size = if wide {
+        24
+    } else {
+        16
+    };
+    for index in 1..5 {
+        let section = 64 + index * section_size;
+        put(
+            data,
+            section + 4,
+            match index {
+                1 => 1,
+                2 => 3,
+                3 => 2,
+                _ => 18,
+            },
+            4,
+            big,
+        );
+        put(
+            data,
+            section + offset_at,
+            match index {
+                1 => 400,
+                2 => 416,
+                3 => 432,
+                _ => 560,
+            },
+            word,
+            big,
+        );
+        put(
+            data,
+            section + size_field,
+            match index {
+                1 | 2 => 1,
+                3 => (symbol_size * 3).to_u64(),
+                _ => 12,
+            },
+            word,
+            big,
+        );
+    }
+    put(data, 64 + 3 * section_size + link_at, 2, 4, big);
+    put(data, 64 + 3 * section_size + entry_at, symbol_size.to_u64(), word, big);
+    put(data, 64 + 4 * section_size + link_at, 3, 4, big);
+    put(data, 64 + 4 * section_size + entry_at, 4, word, big);
+    let symbol_index_at = if wide {
+        6
+    } else {
+        14
+    };
+    put(data, 432 + symbol_size + symbol_index_at, 65535, 2, big);
+    put(data, 432 + 2 * symbol_size + symbol_index_at, 1, 2, big);
+    put(data, 564, 1, 4, big);
+    data
+}
+
+#[test]
+fn extended_symbol_tables_validate_links_layout_and_correspondence() -> () {
+    for wide in Vec::from_array([false, true]) {
+        for big in Vec::from_array([false, true]) {
+            let data = extended_fixture(wide, big);
+            let parsed = testing::expect_ok(elf::parse(data.as_slice()), "valid companion");
+            testing::assert_eq(parsed.symbols()[0].section_index, 1);
+            testing::assert_eq(parsed.symbols()[1].section_index, 1);
+            let section_size = if wide {
+                64
+            } else {
+                40
+            };
+            let section = 64 + 4 * section_size;
+            let word = if wide {
+                8
+            } else {
+                4
+            };
+            let link_at = if wide {
+                40
+            } else {
+                24
+            };
+            let entry_at = if wide {
+                56
+            } else {
+                36
+            };
+            let size_at = if wide {
+                32
+            } else {
+                20
+            };
+            for link in Vec::from_array([0, 1, 2, 4, 5, 4294967295]) {
+                let invalid = data.copy();
+                put(invalid, section + link_at, link, 4, big);
+                testing::assert_eq(
+                    testing::expect_err(elf::parse(invalid.as_slice()), "invalid link"),
+                    elf::Error::InvalidStructure("extended symbol table link"),
+                );
+            }
+            for size in Vec::from_array([0, 1, 8]) {
+                let invalid = data.copy();
+                put(invalid, section + entry_at, size, word, big);
+                testing::assert_eq(
+                    testing::expect_err(elf::parse(invalid.as_slice()), "entry size"),
+                    elf::Error::InvalidStructure("extended symbol table layout"),
+                );
+            }
+            let duplicate = data.copy();
+            let first = 64 + section_size;
+            for index in 0..section_size {
+                duplicate.set(first + index, data.get(section + index));
+            }
+            testing::assert_eq(
+                testing::expect_err(elf::parse(duplicate.as_slice()), "duplicate companion"),
+                elf::Error::InvalidStructure("duplicate extended symbol table"),
+            );
+            for index in Vec::from_array([0, 2]) {
+                let invalid = data.copy();
+                put(invalid, 560 + index * 4, 1, 4, big);
+                testing::assert_eq(
+                    testing::expect_err(elf::parse(invalid.as_slice()), "unused index"),
+                    elf::Error::InvalidStructure("unused extended symbol index"),
+                );
+            }
+            for index in Vec::from_array([0, 5, 4294967295]) {
+                let invalid = data.copy();
+                put(invalid, 564, index, 4, big);
+                testing::assert_eq(
+                    testing::expect_err(elf::parse(invalid.as_slice()), "outside section table"),
+                    elf::Error::InvalidStructure("extended symbol section index"),
+                );
+            }
+            let short = data.copy();
+            put(short, section + size_at, 8, word, big);
+            testing::assert_eq(
+                testing::expect_err(elf::parse(short.as_slice()), "short table"),
+                elf::Error::InvalidStructure("extended symbol indexes"),
+            );
+        }
+    }
+}
