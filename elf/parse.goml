@@ -159,10 +159,13 @@ fn program(data: Slice[byte], offset: u64, class: Class, endian: Endian, index: 
     )
 }
 
-fn name_from_table(data: Slice[byte], table: Section, name_offset: u32, limits: Limits) -> Result[
-    string,
-    Error,
-] {
+fn name_from_table(
+    data: Slice[byte],
+    table: Section,
+    name_offset: u32,
+    limits: Limits,
+    remaining_names: Ref[isize],
+) -> Result[string, Error] {
     if name_offset == 0 {
         return Result::Ok("")
     }
@@ -176,6 +179,7 @@ fn name_from_table(data: Slice[byte], table: Section, name_offset: u32, limits: 
     while position < end {
         let item = data[position.to_isize()];
         if item == 0 {
+            remaining_names.set(remaining_names.get() - raw.len());
             let (valid, value) = string_from_utf8(raw);
             if !valid {
                 return Result::Err(Error::InvalidName)
@@ -184,6 +188,9 @@ fn name_from_table(data: Slice[byte], table: Section, name_offset: u32, limits: 
         }
         if raw.len() >= limits.max_name_bytes {
             return Result::Err(Error::LimitExceeded("name bytes"))
+        }
+        if raw.len() >= remaining_names.get() {
+            return Result::Err(Error::LimitExceeded("total name bytes"))
         }
         raw.push(item);
         position += 1;
@@ -197,6 +204,7 @@ fn parse_symbols(
     class: Class,
     endian: Endian,
     limits: Limits,
+    remaining_names: Ref[isize],
 ) -> Result[(Vec[Symbol], Vec[Symbol]), Error] {
     let regular = Vec::new();
     let dynamic = Vec::new();
@@ -293,7 +301,13 @@ fn parse_symbols(
                 short_index
             };
             let symbol = Symbol {
-                name: name_from_table(data, sections[section.link.to_isize()], name_offset, limits)?,
+                name: name_from_table(
+                    data,
+                    sections[section.link.to_isize()],
+                    name_offset,
+                    limits,
+                    remaining_names,
+                )?,
                 info,
                 other,
                 section_index,
@@ -316,7 +330,18 @@ pub fn parse(data: Slice[byte]) -> Result[File, Error] {
 }
 
 pub fn parse_with_limits(data: Slice[byte], limits: Limits) -> Result[File, Error] {
+    parse_with_name_budget(data, limits, limits.max_file_bytes)
+}
+
+pub fn parse_with_name_budget(data: Slice[byte], limits: Limits, max_total_name_bytes: isize) -> Result[
+    File,
+    Error,
+] {
     limits.validate()?;
+    if max_total_name_bytes < 0 {
+        return Result::Err(Error::LimitExceeded("negative total name budget"))
+    }
+    let remaining_names = Ref::new(max_total_name_bytes);
     if data.len() > limits.max_file_bytes {
         return Result::Err(Error::LimitExceeded("file bytes"))
     }
@@ -503,7 +528,7 @@ pub fn parse_with_limits(data: Slice[byte], limits: Limits) -> Result[File, Erro
     for raw in raw_sections {
         let mut value = raw.value;
         value.name = match names {
-            Some(table) => name_from_table(data, table, raw.name_offset, limits)?,
+            Some(table) => name_from_table(data, table, raw.name_offset, limits, remaining_names)?,
             None => "",
         };
         sections.push(value)
@@ -522,7 +547,7 @@ pub fn parse_with_limits(data: Slice[byte], limits: Limits) -> Result[File, Erro
         }
         programs.push(value)
     }
-    let (regular, dynamic) = parse_symbols(data, sections, class, endian, limits)?;
+    let (regular, dynamic) = parse_symbols(data, sections, class, endian, limits, remaining_names)?;
     Result::Ok(
         File {
             header_value: Header {

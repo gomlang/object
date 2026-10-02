@@ -12,6 +12,15 @@ entries, and escaped indexes outside the section table return `InvalidStructure`
 These checks follow the [ELF section-table specification](https://gabi.xinuos.com/elf/03-sheader.html).
 Downstream regressions cover ELF32/ELF64 in both byte orders.
 
+Decoded section and symbol names share a cumulative UTF-8 byte budget. Every
+produced name is charged, including repeated references to the same string-table
+entry; terminating NUL bytes and empty names are not charged. `parse` and
+`parse_with_limits` use `limits.max_file_bytes` as this budget (64 MiB by default).
+`parse_with_name_budget(bytes, limits, max_total_name_bytes)` selects a separate
+nonnegative total while preserving the existing `Limits` record. Budget checks
+precede copying and UTF-8 decoding; exhaustion returns
+`LimitExceeded("total name bytes")`. Individual name limits still apply.
+
 Run `(cd ../verification && just ecosystem-test object)` at the repository root for module tests, example and downstream checks, and Go `debug/elf` reference vectors.
 
 ## Development and examples
