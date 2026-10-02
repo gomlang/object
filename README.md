@@ -6,4 +6,16 @@ The parser takes a byte slice and returns `Result[File, elf::Error]`. It validat
 
 This is a bounded metadata reader. It does not resolve relocations, decompress sections, interpret notes, or construct a dynamic linker view. `SHT_NOBITS` sections have no file-backed data, so `section_data` returns empty bytes for them.
 
-Run `(cd ../verification && just ecosystem-test object)` at the repository root for module tests, an external consumer, and Go `debug/elf` reference vectors.
+Run `(cd ../verification && just ecosystem-test object)` at the repository root for module tests, example and downstream checks, and Go `debug/elf` reference vectors.
+
+## Development and examples
+
+Requires GoML 0.1.55 or newer. The `examples/basic/` example shares the root manifest and its dependencies. From the library root, run:
+
+```sh
+goml run --example basic
+goml test
+goml verify --timeout 300s
+```
+
+`goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test object)` also retains the library-specific smoke and compatibility checks.

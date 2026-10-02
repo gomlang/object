@@ -6,7 +6,7 @@ use std::testing;
 
 pub fn exercise() -> () {
     let raw = testing::expect_ok(
-        fs::read_bytes_structured("tests/data/elf64le.bin"),
+        fs::read_bytes_structured(fixture_path("tests/data/elf64le.bin")),
         "ELF consumer fixture",
     );
     let file = testing::expect_ok(elf::parse(raw.as_slice()), "ELF consumer parse");

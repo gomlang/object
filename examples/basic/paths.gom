@@ -1,0 +1,11 @@
+package main;
+
+use std::fs;
+
+pub fn fixture_path(relative: string) -> string {
+    if fs::is_dir("examples/basic") {
+        "examples/basic/" + relative
+    } else {
+        relative
+    }
+}

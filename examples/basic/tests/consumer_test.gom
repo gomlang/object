@@ -1,6 +1,6 @@
 package tests;
 
-use consumer::object as app;
+use ecosystem::object::examples::basic as app;
 
 #[test]
 fn external_object_package_api() -> () {

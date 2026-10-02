@@ -1,5 +1,6 @@
 package tests;
 
+use ecosystem::object::examples::basic as example_files;
 use ecosystem::object::elf;
 use elf::{Class, Endian};
 use std::fs;
@@ -8,7 +9,7 @@ use std::testing;
 #[test]
 fn go_126_debug_elf_reference() -> () {
     let source = testing::expect_ok(
-        fs::read_file_structured("tests/data/reference.tsv"),
+        fs::read_file_structured(example_files::fixture_path("tests/data/reference.tsv")),
         "Go debug/elf reference",
     );
     let mut cases = 0;
@@ -19,7 +20,7 @@ fn go_126_debug_elf_reference() -> () {
         let fields = line.split("\t");
         testing::assert_eq(fields.len(), 11);
         let raw = testing::expect_ok(
-            fs::read_bytes_structured("tests/data/" + fields[0]),
+            fs::read_bytes_structured(example_files::fixture_path("tests/data/") + fields[0]),
             "ELF reference input",
         );
         let file = testing::expect_ok(elf::parse(raw.as_slice()), "Go reference ELF parse");
