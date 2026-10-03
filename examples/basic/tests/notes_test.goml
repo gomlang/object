@@ -1,0 +1,31 @@
+package tests;
+
+use ecosystem::object::elf;
+use std::bytes;
+use std::testing;
+
+#[test]
+fn downstream_can_read_gnu_build_id_as_typed_note() -> () {
+    let raw = note_data(
+        Vec::from_array(
+            [4, 0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, b'G', b'N', b'U', 0, 222, 173, 190, 239],
+        ),
+    );
+    let notes = testing::expect_ok(
+        elf::parse_notes_with(
+            raw.as_slice(),
+            elf::Endian::Little,
+            elf::NoteAlignment::Four,
+            elf::NoteLimits { max_notes: 1, ..elf::NoteLimits::standard() },
+        ),
+        "build ID",
+    );
+    testing::assert_eq(notes.len(), 1);
+    testing::assert_eq(notes[0].kind, 3);
+    testing::assert(notes[0].name.to_vec() == Vec::from_array([b'G', b'N', b'U', 0]));
+    testing::assert(notes[0].descriptor.to_vec() == Vec::from_array([222, 173, 190, 239]));
+}
+
+fn note_data(data: Vec[byte]) -> bytes::Bytes {
+    bytes::Bytes::from_slice_copy(data.as_slice())
+}

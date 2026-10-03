@@ -1,0 +1,160 @@
+package elf;
+
+use std::bytes;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum NoteAlignment {
+    Four,
+    Eight,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct NoteLimits {
+    pub max_input_bytes: isize,
+    pub max_notes: isize,
+    pub max_name_bytes: isize,
+    pub max_descriptor_bytes: isize,
+}
+
+impl NoteLimits {
+    pub fn standard() -> NoteLimits {
+        NoteLimits {
+            max_input_bytes: 33554432,
+            max_notes: 100000,
+            max_name_bytes: 4096,
+            max_descriptor_bytes: 33554432,
+        }
+    }
+
+    pub fn validate(self: NoteLimits) -> Result[(), Error] {
+        if self.max_input_bytes < 0 || self.max_notes < 0 || self.max_name_bytes < 0
+            || self.max_descriptor_bytes < 0 {
+            Result::Err(Error::LimitExceeded("negative note limit"))
+        } else {
+            Result::Ok(())
+        }
+    }
+}
+
+pub struct Note {
+    pub name: bytes::Bytes,
+    pub kind: u32,
+    pub descriptor: bytes::Bytes,
+}
+
+fn note_aligned(end: isize, length: isize, alignment: isize) -> Result[isize, Error] {
+    let padding = (alignment - end % alignment) % alignment;
+    if padding > length - end {
+        return Result::Err(Error::Truncated)
+    }
+    Result::Ok(end + padding)
+}
+
+pub fn parse_notes_with(
+    data: Slice[byte],
+    endian: Endian,
+    alignment: NoteAlignment,
+    limits: NoteLimits,
+) -> Result[Vec[Note], Error] {
+    limits.validate()?;
+    if data.len() > limits.max_input_bytes {
+        return Result::Err(Error::LimitExceeded("note input bytes"))
+    }
+    let alignment = match alignment {
+        Four => 4,
+        Eight => 8,
+    };
+    let notes: Vec[Note] = Vec::new();
+    let mut offset = 0;
+    while offset < data.len() {
+        if notes.len() >= limits.max_notes {
+            return Result::Err(Error::LimitExceeded("notes"))
+        }
+        if data.len() - offset < 12 {
+            return Result::Err(Error::Truncated)
+        }
+        let namesz = read_number(data, offset.to_u64(), 4, endian)?;
+        let descsz = read_number(data, (offset + 4).to_u64(), 4, endian)?;
+        let kind = read_number(data, (offset + 8).to_u64(), 4, endian)?.to_u32();
+        offset += 12;
+        if namesz > limits.max_name_bytes.to_u64() {
+            return Result::Err(Error::LimitExceeded("note name bytes"))
+        }
+        if descsz > limits.max_descriptor_bytes.to_u64() {
+            return Result::Err(Error::LimitExceeded("note descriptor bytes"))
+        }
+        if namesz > (data.len() - offset).to_u64() {
+            return Result::Err(Error::Truncated)
+        }
+        let name_start = offset;
+        let name_end = offset + namesz.to_isize();
+        if namesz > 0 && data[name_end - 1] != 0 {
+            return Result::Err(Error::InvalidStructure("unterminated note name"))
+        }
+        offset = note_aligned(name_end, data.len(), alignment)?;
+        if descsz > (data.len() - offset).to_u64() {
+            return Result::Err(Error::Truncated)
+        }
+        let descriptor_end = offset + descsz.to_isize();
+        let next = note_aligned(descriptor_end, data.len(), alignment)?;
+        notes.push(
+            Note {
+                name: bytes::Bytes::from_slice_copy(data.sub(name_start, name_end)),
+                kind,
+                descriptor: bytes::Bytes::from_slice_copy(data.sub(offset, descriptor_end)),
+            },
+        );
+        offset = next;
+    }
+    Result::Ok(notes)
+}
+
+pub fn parse_notes(data: Slice[byte], endian: Endian, alignment: NoteAlignment) -> Result[
+    Vec[Note],
+    Error,
+] {
+    parse_notes_with(data, endian, alignment, NoteLimits::standard())
+}
+
+impl File {
+    pub fn section_notes(self: File, index: isize, alignment: NoteAlignment, limits: NoteLimits) -> Result[
+        Vec[Note],
+        Error,
+    ] {
+        let section = match self.section(index) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidRange("section index")),
+        };
+        if section.kind != 7 {
+            return Result::Err(Error::InvalidStructure("not a note section"))
+        }
+        parse_notes_with(
+            self.data.slice(section.offset.to_isize(), (section.offset + section.size).to_isize()),
+            self.header_value.endian,
+            alignment,
+            limits,
+        )
+    }
+
+    pub fn program_notes(self: File, index: isize, alignment: NoteAlignment, limits: NoteLimits) -> Result[
+        Vec[Note],
+        Error,
+    ] {
+        if index < 0 || index >= self.programs_value.len() {
+            return Result::Err(Error::InvalidRange("program index"))
+        }
+        let program = self.programs_value.get(index);
+        if program.kind != 4 {
+            return Result::Err(Error::InvalidStructure("not a note program"))
+        }
+        parse_notes_with(
+            self.data.slice(
+                program.offset.to_isize(),
+                (program.offset + program.file_size).to_isize(),
+            ),
+            self.header_value.endian,
+            alignment,
+            limits,
+        )
+    }
+}

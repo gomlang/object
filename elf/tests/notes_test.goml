@@ -1,0 +1,211 @@
+package tests;
+
+use ecosystem::object::elf;
+use std::bytes;
+use std::fs;
+use std::testing;
+
+fn note_bytes() -> bytes::Bytes {
+    note_data(
+        Vec::from_array([4, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0, b'G', b'N', b'U', 0, 1, 2, 3, 0]),
+    )
+}
+
+#[test]
+fn note_records_preserve_names_unknown_kinds_descriptors_and_owned_bytes() -> () {
+    for width in[32, 64] {
+        for order in["le", "be"] {
+            for alignment in[4, 8] {
+                let raw = testing::expect_ok(
+                    fs::read_bytes_structured(f"elf/tests/data/notes{width}{order}_{alignment}.bin"),
+                    "independent fixture",
+                );
+                let file = testing::expect_ok(elf::parse(raw.as_slice()), "ELF");
+                let align = if alignment == 4 {
+                    elf::NoteAlignment::Four
+                } else {
+                    elf::NoteAlignment::Eight
+                };
+                let limits = elf::NoteLimits::standard();
+                let notes = testing::expect_ok(
+                    file.section_notes(1, align, limits),
+                    "section notes",
+                );
+                let program = testing::expect_ok(
+                    file.program_notes(0, align, limits),
+                    "program notes",
+                );
+                testing::assert_eq(notes.len(), 3);
+                testing::assert_eq(program.len(), 3);
+                for index in 0..3 {
+                    testing::assert(notes[index].name.to_vec() == program[index].name.to_vec());
+                    testing::assert(
+                        notes[index].descriptor.to_vec() == program[index].descriptor.to_vec(),
+                    );
+                    testing::assert_eq(notes[index].kind, program[index].kind);
+                }
+                testing::assert(notes[0].name.to_vec() == Vec::from_array([b'G', b'N', b'U', 0]));
+                testing::assert(notes[0].descriptor.to_vec() == Vec::from_array([1, 2, 3]));
+                testing::assert_eq(notes[0].kind, 3);
+                testing::assert_eq(notes[1].name.len(), 0);
+                testing::assert_eq(notes[1].descriptor.len(), 0);
+                testing::assert_eq(notes[2].kind, 0xffffffff);
+                testing::assert(notes[2].name.to_vec() == Vec::from_array([255, 0]));
+                testing::assert(
+                    notes[2].descriptor.to_vec() == Vec::from_array([10, 0, 20, 30, 40]),
+                );
+                raw.set(128 + 12, 0);
+                notes[0].name.set(0, 0);
+                notes[0].descriptor.set(0, 0);
+                let fresh = testing::expect_ok(
+                    file.section_notes(1, align, limits),
+                    "fresh ownership",
+                );
+                testing::assert_eq(fresh[0].name.get(0), b'G');
+                testing::assert_eq(fresh[0].descriptor.get(0), 1);
+                testing::assert_eq(
+                    testing::expect_err(file.section_notes(0, align, limits), "wrong section type"),
+                    elf::Error::InvalidStructure("not a note section"),
+                );
+                testing::assert_err(file.section_notes(-1, align, limits));
+                testing::assert_err(file.program_notes(1, align, limits));
+            }
+        }
+    }
+}
+
+#[test]
+fn notes_reject_every_partial_record_missing_padding_and_invalid_owner() -> () {
+    let raw = note_bytes();
+    for size in 1..raw.len() {
+        testing::assert_err(
+            elf::parse_notes(raw.slice(0, size), elf::Endian::Little, elf::NoteAlignment::Four),
+        );
+    }
+    testing::assert_eq(
+        testing::expect_ok(
+            elf::parse_notes(raw.slice(0, 0), elf::Endian::Little, elf::NoteAlignment::Four),
+            "empty stream",
+        ).len(),
+        0,
+    );
+    let notes = testing::expect_ok(
+        elf::parse_notes(raw.as_slice(), elf::Endian::Little, elf::NoteAlignment::Four),
+        "record",
+    );
+    raw.set(16, 9);
+    testing::assert_eq(notes[0].descriptor.get(0), 1);
+    raw.set(15, b'X');
+    testing::assert_eq(
+        testing::expect_err(
+            elf::parse_notes(raw.as_slice(), elf::Endian::Little, elf::NoteAlignment::Four),
+            "owner termination",
+        ),
+        elf::Error::InvalidStructure("unterminated note name"),
+    );
+    let huge = note_data(Vec::from_array([255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]));
+    testing::assert_eq(
+        testing::expect_err(
+            elf::parse_notes_with(
+                huge.as_slice(),
+                elf::Endian::Little,
+                elf::NoteAlignment::Four,
+                elf::NoteLimits { max_name_bytes: 4294967295, ..elf::NoteLimits::standard() },
+            ),
+            "huge length is bounded before conversion",
+        ),
+        elf::Error::Truncated,
+    );
+    let trailing = note_bytes();
+    trailing.push(0);
+    testing::assert_err(
+        elf::parse_notes(trailing.as_slice(), elf::Endian::Little, elf::NoteAlignment::Four),
+    );
+}
+
+#[test]
+fn note_limits_validate_before_allocation_and_accept_exact_bounds() -> () {
+    let raw = note_bytes();
+    let limits = elf::NoteLimits {
+        max_input_bytes: 20,
+        max_notes: 1,
+        max_name_bytes: 4,
+        max_descriptor_bytes: 3,
+    };
+    testing::assert_eq(
+        testing::expect_ok(
+            elf::parse_notes_with(
+                raw.as_slice(),
+                elf::Endian::Little,
+                elf::NoteAlignment::Four,
+                limits,
+            ),
+            "exact caps",
+        ).len(),
+        1,
+    );
+    for limited in[
+        elf::NoteLimits { max_input_bytes: 19, ..limits },
+        elf::NoteLimits { max_notes: 0, ..limits },
+        elf::NoteLimits { max_name_bytes: 3, ..limits },
+        elf::NoteLimits { max_descriptor_bytes: 2, ..limits },
+        elf::NoteLimits { max_notes: -1, ..limits },
+    ] {
+        testing::assert_err(
+            elf::parse_notes_with(
+                raw.as_slice(),
+                elf::Endian::Little,
+                elf::NoteAlignment::Four,
+                limited,
+            ),
+        );
+    }
+    let empty = bytes::Bytes::new();
+    testing::assert_eq(
+        testing::expect_ok(
+            elf::parse_notes_with(
+                empty.as_slice(),
+                elf::Endian::Little,
+                elf::NoteAlignment::Four,
+                elf::NoteLimits {
+                    max_input_bytes: 0,
+                    max_notes: 0,
+                    max_name_bytes: 0,
+                    max_descriptor_bytes: 0,
+                },
+            ),
+            "zero limits empty",
+        ).len(),
+        0,
+    );
+}
+
+#[test]
+fn eight_byte_notes_align_descriptor_offsets_instead_of_owner_lengths() -> () {
+    let raw = note_data(
+        Vec::from_array(
+            [4, 0, 0, 0, 3, 0, 0, 0, 3, 0, 0, 0, b'G', b'N', b'U', 0, 1, 2, 3, 91, 92, 93, 94, 95],
+        ),
+    );
+    let notes = testing::expect_ok(
+        elf::parse_notes(raw.as_slice(), elf::Endian::Little, elf::NoteAlignment::Eight),
+        "eight align descriptor offset 16",
+    );
+    testing::assert(notes[0].descriptor.to_vec() == Vec::from_array([1, 2, 3]));
+    testing::assert_err(
+        elf::parse_notes(raw.as_slice(), elf::Endian::Little, elf::NoteAlignment::Four),
+    );
+    let big = note_data(
+        Vec::from_array([0, 0, 0, 4, 0, 0, 0, 3, 0, 0, 0, 3, b'G', b'N', b'U', 0, 1, 2, 3, 0]),
+    );
+    let note = testing::expect_ok(
+        elf::parse_notes(big.as_slice(), elf::Endian::Big, elf::NoteAlignment::Four),
+        "big endian",
+    )[0];
+    testing::assert_eq(note.kind, 3);
+    testing::assert(note.descriptor.to_vec() == Vec::from_array([1, 2, 3]));
+}
+
+fn note_data(data: Vec[byte]) -> bytes::Bytes {
+    bytes::Bytes::from_slice_copy(data.as_slice())
+}
