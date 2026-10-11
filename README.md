@@ -51,7 +51,7 @@ and object count. The existing file `Limits` record remains unchanged.
 Independent struct-packed fixtures cover ELF32/ELF64, both byte orders and both
 alignments; regenerate them with `python3 elf/tests/data/make_notes.py`.
 
-Run `(cd ../verification && just ecosystem-test object)` at the repository root for module tests, example and downstream checks, and Go `debug/elf` reference vectors.
+Run `(cd ../workflows && just ecosystem-test object)` at the repository root for module tests, example and downstream checks, and Go `debug/elf` reference vectors.
 
 ## Development and examples
 
@@ -60,7 +60,7 @@ Requires GoML 0.1.56 or newer. The `examples/basic/` example shares the root man
 ```sh
 goml run --example basic
 goml test
-(cd ../verification && just ecosystem-test object)
+(cd ../workflows && just ecosystem-test object)
 ```
 
-`goml test` builds the example and runs its tests. The ecosystem verifier uses an isolated registry snapshot and retains the library-specific smoke and compatibility checks. Use the source-built toolchain pinned in [verification/ci/toolchain.json](https://github.com/gomlang/verification/blob/main/ci/toolchain.json) for that workflow.
+`goml test` builds the example and runs its tests. The ecosystem verifier uses an isolated registry snapshot and retains the library-specific smoke and compatibility checks. Use the source-built toolchain pinned in [workflows/ci/toolchain.json](https://github.com/gomlang/workflows/blob/main/ci/toolchain.json) for that workflow.
