@@ -60,7 +60,7 @@ Requires GoML 0.1.56 or newer. The `examples/basic/` example shares the root man
 ```sh
 goml run --example basic
 goml test
-goml verify --timeout 300s
+(cd ../verification && just ecosystem-test object)
 ```
 
-`goml test` builds the example and runs its tests. `goml verify` repeats the example checks as an independent module against an isolated registry snapshot. `(cd ../verification && just ecosystem-test object)` also retains the library-specific smoke and compatibility checks.
+`goml test` builds the example and runs its tests. The ecosystem verifier uses an isolated registry snapshot and retains the library-specific smoke and compatibility checks. Use the source-built toolchain pinned in [verification/ci/toolchain.json](https://github.com/gomlang/verification/blob/main/ci/toolchain.json) for that workflow.

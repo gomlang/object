@@ -8,4 +8,4 @@ Regenerate the reference data from `tests/data` with Go 1.26:
 go run generate.go > reference.tsv
 ```
 
-This example shares the library root manifest and its dependencies. From the library root, run `goml verify --example basic` to build and test it as an independent downstream module.
+This example shares the library root manifest and its dependencies. From the library root, run `goml test` to build and test it, or `goml run --example basic` to execute it. Run `(cd ../verification && just ecosystem-test object)` for the isolated registry and compatibility checks.
