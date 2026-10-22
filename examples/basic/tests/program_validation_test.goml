@@ -1,0 +1,213 @@
+package tests;
+
+use ecosystem::object::elf;
+use ecosystem::object::examples::basic as example_files;
+use std::fs;
+use std::testing;
+
+#[test]
+fn load_segments_validate_sizes_and_alignment_in_all_encodings() -> () {
+    for wide in Vec::from_array([false, true]) {
+        for big in Vec::from_array([false, true]) {
+            let filename = example_files::fixture_path("tests/data/elf")
+                + if wide {
+                    "64"
+                } else {
+                    "32"
+                }
+                + if big {
+                    "be.bin"
+                } else {
+                    "le.bin"
+                };
+            let data = testing::expect_ok(fs::read_bytes_structured(filename), "fixture");
+            let header = if wide {
+                64
+            } else {
+                52
+            };
+            let word = if wide {
+                8
+            } else {
+                4
+            };
+            let mem_at = header
+                + if wide {
+                    40
+                } else {
+                    20
+                };
+            let align_at = header
+                + if wide {
+                    48
+                } else {
+                    28
+                };
+            let addr_at = header
+                + if wide {
+                    16
+                } else {
+                    8
+                };
+            for size in Vec::from_array([0, 1]) {
+                let invalid = data.copy();
+                put(invalid, mem_at, size, word, big);
+                testing::assert_eq(
+                    testing::expect_err(elf::parse(invalid.as_slice()), "load size"),
+                    elf::Error::InvalidStructure("load segment size"),
+                );
+            }
+            for alignment in Vec::from_array([3, 6, 15, 4294967295]) {
+                let invalid = data.copy();
+                put(invalid, align_at, alignment, word, big);
+                testing::assert_eq(
+                    testing::expect_err(elf::parse(invalid.as_slice()), "load alignment"),
+                    elf::Error::InvalidStructure("load segment alignment"),
+                );
+            }
+            let invalid = data.copy();
+            put(invalid, addr_at, 4097, word, big);
+            testing::assert_eq(
+                testing::expect_err(elf::parse(invalid.as_slice()), "load congruence"),
+                elf::Error::InvalidStructure("load segment congruence"),
+            );
+            for alignment in Vec::from_array([0, 1]) {
+                put(invalid, align_at, alignment, word, big);
+                testing::assert_ok(elf::parse(invalid.as_slice()));
+            }
+            for size in Vec::from_array([2, 3, 4294967295]) {
+                let valid = data.copy();
+                put(valid, mem_at, size, word, big);
+                testing::assert_ok(elf::parse(valid.as_slice()));
+            }
+            let empty = data.copy();
+            put(
+                empty,
+                header
+                    + if wide {
+                        32
+                    } else {
+                        16
+                    },
+                0,
+                word,
+                big,
+            );
+            put(empty, mem_at, 0, word, big);
+            testing::assert_ok(elf::parse(empty.as_slice()));
+            // Matching nonzero remainders and high addresses are legal metadata.
+            let congruent = data.copy();
+            put(
+                congruent,
+                header
+                    + if wide {
+                        8
+                    } else {
+                        4
+                    },
+                127,
+                word,
+                big,
+            );
+            put(
+                congruent,
+                addr_at,
+                if wide {
+                    0xffffffffffffffff
+                } else {
+                    0xffffffff
+                },
+                word,
+                big,
+            );
+            testing::assert_ok(elf::parse(congruent.as_slice()));
+            // Notes need not occupy memory and do not inherit PT_LOAD constraints.
+            let note = data.copy();
+            put(note, header, 4, 4, big);
+            put(note, mem_at, 0, word, big);
+            testing::assert_ok(elf::parse(note.as_slice()));
+        }
+    }
+}
+
+#[test]
+fn null_program_payload_is_ignored_but_other_program_ranges_are_checked() -> () {
+    for wide in Vec::from_array([false, true]) {
+        for big in Vec::from_array([false, true]) {
+            let filename = example_files::fixture_path("tests/data/elf")
+                + if wide {
+                    "64"
+                } else {
+                    "32"
+                }
+                + if big {
+                    "be.bin"
+                } else {
+                    "le.bin"
+                };
+            let data = testing::expect_ok(fs::read_bytes_structured(filename), "fixture");
+            let header = if wide {
+                64
+            } else {
+                52
+            };
+            let word = if wide {
+                8
+            } else {
+                4
+            };
+            let maximum = if wide {
+                0xffffffffffffffff
+            } else {
+                0xffffffff
+            };
+            put(data, header, 0, 4, big);
+            put(
+                data,
+                header
+                    + if wide {
+                        8
+                    } else {
+                        4
+                    },
+                maximum,
+                word,
+                big,
+            );
+            put(
+                data,
+                header
+                    + if wide {
+                        32
+                    } else {
+                        16
+                    },
+                maximum,
+                word,
+                big,
+            );
+            put(
+                data,
+                header
+                    + if wide {
+                        48
+                    } else {
+                        28
+                    },
+                3,
+                word,
+                big,
+            );
+            let parsed = testing::expect_ok(elf::parse(data.as_slice()), "undefined NULL fields");
+            testing::assert_eq(parsed.programs()[0].offset, maximum);
+            testing::assert_eq(testing::expect_ok(parsed.program_data(0), "ignored data").len(), 0);
+            for kind in Vec::from_array([1, 4, 0x60000001]) {
+                put(data, header, kind, 4, big);
+                testing::assert_eq(
+                    testing::expect_err(elf::parse(data.as_slice()), "active program range"),
+                    elf::Error::InvalidRange("program data"),
+                );
+            }
+        }
+    }
+}

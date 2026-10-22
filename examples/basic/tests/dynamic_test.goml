@@ -1,0 +1,266 @@
+package tests;
+
+use ecosystem::object::examples::basic as example_files;
+use ecosystem::object::elf;
+use std::bytes;
+use std::fs;
+use std::testing;
+
+fn dynamic_fixture(bits: isize, order: string) -> bytes::Bytes {
+    testing::expect_ok(
+        fs::read_bytes_structured(
+            example_files::fixture_path(f"tests/data/dynamic{bits}{order}.bin"),
+        ),
+        "fixture",
+    )
+}
+
+#[test]
+fn dynamic_entries_strings_and_limits() -> () {
+    for bits in[32, 64] {
+        for order in["le", "be"] {
+            let file = testing::expect_ok(
+                elf::parse(dynamic_fixture(bits, order).as_slice()),
+                "ELF",
+            );
+            let limits = elf::DynamicLimits::standard();
+            let entries = testing::expect_ok(file.section_dynamic(2, limits), "dynamic");
+            testing::assert_eq(entries.len(), 7);
+            testing::assert_eq(entries[6].tag, -1);
+            testing::assert_eq(
+                entries[6].value,
+                if bits == 64 {
+                    0.to_u64() - 1
+                } else {
+                    0xffffffff.to_u64()
+                },
+            );
+            testing::assert(
+                testing::expect_ok(file.program_dynamic(0, limits), "program") == entries,
+            );
+            testing::assert(
+                testing::expect_ok(file.section_dynamic_strings(2, 1, limits), "needed")
+                    == Vec::from_array(["liba.so", "libb.so", "liba.so"]),
+            );
+            testing::assert(
+                testing::expect_ok(file.section_dynamic_strings(2, 14, limits), "soname")
+                    == Vec::from_array(["self.so"]),
+            );
+            for tag in[15.to_i64(), 29.to_i64()] {
+                testing::assert(
+                    testing::expect_ok(file.section_dynamic_strings(2, tag, limits), "paths")
+                        == Vec::from_array(["$ORIGIN"]),
+                );
+            }
+            testing::assert_ok(
+                file.section_dynamic(
+                    2,
+                    elf::DynamicLimits { max_entries: 7, max_input_bytes: bits / 8 * 18, ..limits },
+                ),
+            );
+            testing::assert_err(
+                file.section_dynamic(2, elf::DynamicLimits { max_entries: 6, ..limits }),
+            );
+            testing::assert_err(
+                file.section_dynamic(
+                    2,
+                    elf::DynamicLimits { max_input_bytes: bits / 8 * 18 - 1, ..limits },
+                ),
+            );
+            testing::assert_ok(
+                file.section_dynamic_strings(
+                    2,
+                    1,
+                    elf::DynamicLimits { max_string_bytes: 7, max_total_string_bytes: 21, ..limits },
+                ),
+            );
+            testing::assert_err(
+                file.section_dynamic_strings(
+                    2,
+                    1,
+                    elf::DynamicLimits { max_string_bytes: 6, ..limits },
+                ),
+            );
+            testing::assert_err(
+                file.section_dynamic_strings(
+                    2,
+                    1,
+                    elf::DynamicLimits { max_total_string_bytes: 20, ..limits },
+                ),
+            );
+            for bad in[
+                elf::DynamicLimits { max_entries: -1, ..limits },
+                elf::DynamicLimits { max_input_bytes: -1, ..limits },
+                elf::DynamicLimits { max_string_bytes: -1, ..limits },
+                elf::DynamicLimits { max_total_string_bytes: -1, ..limits },
+            ] {
+                testing::assert_err(file.section_dynamic(2, bad));
+                testing::assert_err(file.program_dynamic(0, bad));
+            }
+            testing::assert_err(file.section_dynamic(-1, limits));
+            testing::assert_err(file.section_dynamic(3, limits));
+            testing::assert_err(file.section_dynamic(1, limits));
+            testing::assert_err(file.program_dynamic(-1, limits));
+            testing::assert_err(file.program_dynamic(1, limits));
+            testing::assert_err(file.section_dynamic_strings(2, 5, limits));
+        }
+    }
+}
+
+#[test]
+fn dynamic_invalid_records_and_strings() -> () {
+    for bits in[32, 64] {
+        for order in["le", "be"] {
+            let wide = bits == 64;
+            let width = bits / 8;
+            let sh = 512
+                + 2
+                    * if wide {
+                        64
+                    } else {
+                        40
+                    };
+            let size = sh
+                + if wide {
+                    32
+                } else {
+                    20
+                };
+            let entry = sh
+                + if wide {
+                    56
+                } else {
+                    36
+                };
+            let link = sh
+                + if wide {
+                    40
+                } else {
+                    24
+                };
+            for (offset, n, value) in[
+                (size, width, 0.to_u64()),
+                (size, width, 1.to_u64()),
+                (entry, width, 0.to_u64()),
+                (entry, width, 1.to_u64()),
+                (160 + 7 * width * 2, width, 1.to_u64()),
+            ] {
+                let raw = dynamic_fixture(bits, order);
+                relocation_put(raw, offset, n, order == "be", value);
+                let file = testing::expect_ok(elf::parse(raw.as_slice()), "lazy dynamic");
+                testing::assert_err(file.section_dynamic(2, elf::DynamicLimits::standard()));
+            }
+            for (offset, n, value) in[
+                (link, 4, 0.to_u64()),
+                (link, 4, 2.to_u64()),
+                (link, 4, 3.to_u64()),
+                (160 + width, width, 0xffffffff.to_u64()),
+                (384 + 1, 1, 255.to_u64()),
+                (160 + width, width, 33.to_u64()),
+            ] {
+                let raw = dynamic_fixture(bits, order);
+                relocation_put(raw, offset, n, order == "be", value);
+                let file = testing::expect_ok(elf::parse(raw.as_slice()), "lazy strings");
+                testing::assert_err(
+                    file.section_dynamic_strings(2, 1, elf::DynamicLimits::standard()),
+                );
+            }
+            let raw = dynamic_fixture(bits, order);
+            relocation_put(raw, 160 + width, width, order == "be", 31);
+            raw.set(384 + 32, 120);
+            let file = testing::expect_ok(elf::parse(raw.as_slice()), "unterminated string");
+            testing::assert_err(file.section_dynamic_strings(2, 1, elf::DynamicLimits::standard()));
+            let raw = dynamic_fixture(bits, order);
+            relocation_put(raw, 160, width, order == "be", 0);
+            let file = testing::expect_ok(elf::parse(raw.as_slice()), "empty array");
+            testing::assert_eq(
+                testing::expect_ok(
+                    file.section_dynamic(
+                        2,
+                        elf::DynamicLimits { max_entries: 0, ..elf::DynamicLimits::standard() },
+                    ),
+                    "empty",
+                ).len(),
+                0,
+            );
+            let raw = dynamic_fixture(bits, order);
+            relocation_put(raw, 160 + width, width, order == "be", 0);
+            let file = testing::expect_ok(elf::parse(raw.as_slice()), "empty string");
+            testing::assert_eq(
+                testing::expect_ok(
+                    file.section_dynamic_strings(2, 1, elf::DynamicLimits::standard()),
+                    "strings",
+                )[0],
+                "",
+            );
+        }
+    }
+}
+
+#[test]
+fn dynamic_program_without_sections() -> () {
+    for bits in[32, 64] {
+        for order in["le", "be"] {
+            let wide = bits == 64;
+            let width = bits / 8;
+            let raw = dynamic_fixture(bits, order);
+            relocation_put(
+                raw,
+                if wide {
+                    40
+                } else {
+                    32
+                },
+                width,
+                order == "be",
+                0,
+            );
+            relocation_put(
+                raw,
+                if wide {
+                    60
+                } else {
+                    48
+                },
+                2,
+                order == "be",
+                0,
+            );
+            let file = testing::expect_ok(elf::parse(raw.as_slice()), "sectionless");
+            testing::assert_eq(file.sections().len(), 0);
+            testing::assert_eq(
+                testing::expect_ok(
+                    file.program_dynamic(0, elf::DynamicLimits::standard()),
+                    "program",
+                ).len(),
+                7,
+            );
+            relocation_put(
+                raw,
+                if wide {
+                    64 + 32
+                } else {
+                    52 + 16
+                },
+                width,
+                order == "be",
+                1,
+            );
+            let file = testing::expect_ok(elf::parse(raw.as_slice()), "short program");
+            testing::assert_err(file.program_dynamic(0, elf::DynamicLimits::standard()));
+            relocation_put(
+                raw,
+                if wide {
+                    64
+                } else {
+                    52
+                },
+                4,
+                order == "be",
+                4,
+            );
+            let file = testing::expect_ok(elf::parse(raw.as_slice()), "note program");
+            testing::assert_err(file.program_dynamic(0, elf::DynamicLimits::standard()));
+        }
+    }
+}

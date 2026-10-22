@@ -1,0 +1,24 @@
+package tests;
+
+use ecosystem::object::elf::{Error};
+use std::testing;
+
+#[test]
+fn error_display_preserves_public_messages() -> () {
+    for (error, expected) in[
+        (Error::InvalidMagic, "invalid ELF magic"),
+        (Error::UnsupportedClass, "unsupported ELF class"),
+        (Error::UnsupportedEndian, "unsupported ELF byte order"),
+        (Error::UnsupportedVersion, "unsupported ELF version"),
+        (Error::Truncated, "truncated ELF data"),
+        (Error::InvalidRange(""), "invalid ELF range: "),
+        (Error::InvalidRange("范围 {0}\n雪"), "invalid ELF range: 范围 {0}\n雪"),
+        (Error::InvalidStructure(""), "invalid ELF structure: "),
+        (Error::InvalidStructure("范围 {0}\n雪"), "invalid ELF structure: 范围 {0}\n雪"),
+        (Error::InvalidName, "invalid ELF name string"),
+        (Error::LimitExceeded(""), "ELF resource limit exceeded: "),
+        (Error::LimitExceeded("范围 {0}\n雪"), "ELF resource limit exceeded: 范围 {0}\n雪"),
+    ] {
+        testing::assert_eq(error.to_string(), expected);
+    }
+}

@@ -1,0 +1,165 @@
+package elf;
+
+use ecosystem::compress;
+use ecosystem::compress::zlib;
+use std::bytes;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CompressionHeader {
+    pub kind: u32,
+    pub size: u64,
+    pub alignment: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DecompressionLimits {
+    pub max_input_bytes: isize,
+    pub max_output_bytes: isize,
+    pub max_blocks: isize,
+    pub max_work: isize,
+}
+
+impl DecompressionLimits {
+    pub fn standard() -> DecompressionLimits {
+        DecompressionLimits {
+            max_input_bytes: 33554432,
+            max_output_bytes: 33554432,
+            max_blocks: 1000000,
+            max_work: 268435456,
+        }
+    }
+
+    pub fn validate(self: DecompressionLimits) -> Result[(), Error] {
+        if self.max_input_bytes < 0 || self.max_output_bytes < 0 || self.max_blocks < 0
+            || self.max_work < 0 {
+            Result::Err(Error::LimitExceeded("negative decompression limit"))
+        } else {
+            Result::Ok(())
+        }
+    }
+}
+
+impl File {
+    pub fn section_compression(self: File, index: isize) -> Result[Option[CompressionHeader], Error] {
+        let section = match self.section(index) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidRange("section index")),
+        };
+        if section.flags & 0x800 == 0 {
+            return Result::Ok(Option::None)
+        }
+        if section.kind == 0 || section.kind == 8 {
+            return Result::Err(Error::InvalidStructure("compressed section type"))
+        }
+        if section.flags & 2 != 0
+            && (self.header_value.file_type == 2 || self.header_value.file_type == 3) {
+            return Result::Err(Error::InvalidStructure("compressed allocated section"))
+        }
+        let data = self.data.slice(
+            section.offset.to_isize(),
+            (section.offset + section.size).to_isize(),
+        );
+        let endian = self.header_value.endian;
+        let wide = self.header_value.class == Class::Elf64;
+        let kind = read_number(data, 0, 4, endian)?.to_u32();
+        if wide && read_number(data, 4, 4, endian)? != 0 {
+            return Result::Err(Error::InvalidStructure("compression reserved field"))
+        }
+        let size = read_number(
+            data,
+            if wide {
+                8
+            } else {
+                4
+            },
+            if wide {
+                8
+            } else {
+                4
+            },
+            endian,
+        )?;
+        let alignment = read_number(
+            data,
+            if wide {
+                16
+            } else {
+                8
+            },
+            if wide {
+                8
+            } else {
+                4
+            },
+            endian,
+        )?;
+        if alignment > 1 && alignment & (alignment - 1) != 0 {
+            return Result::Err(Error::InvalidStructure("compression alignment"))
+        }
+        Result::Ok(Option::Some(CompressionHeader { kind, size, alignment }))
+    }
+
+    pub fn section_uncompressed_data(self: File, index: isize, limits: DecompressionLimits) -> Result[
+        bytes::Bytes,
+        Error,
+    ] {
+        limits.validate()?;
+        let section = match self.section(index) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidRange("section index")),
+        };
+        let header = self.section_compression(index)?;
+        let input_size = if section.kind == 0 || section.kind == 8 {
+            0
+        } else {
+            section.size
+        };
+        if input_size > limits.max_input_bytes.to_u64() {
+            return Result::Err(Error::LimitExceeded("compressed section input bytes"))
+        }
+        let Some(header) = header else {
+            if input_size > limits.max_output_bytes.to_u64() {
+                return Result::Err(Error::LimitExceeded("uncompressed section bytes"))
+            }
+            return self.section_data(index)
+        };
+        if header.kind != 1 {
+            return Result::Err(Error::InvalidStructure("unsupported section compression"))
+        }
+        if header.size > limits.max_output_bytes.to_u64() {
+            return Result::Err(Error::LimitExceeded("uncompressed section bytes"))
+        }
+        let header_size = if self.header_value.class == Class::Elf64 {
+            24
+        } else {
+            12
+        };
+        let payload = bytes::Bytes::from_slice_copy(
+            self.data.slice(
+                section.offset.to_isize() + header_size,
+                (section.offset + section.size).to_isize(),
+            ),
+        );
+        let output = zlib::decode(
+            payload,
+            compress::Limits {
+                max_input_bytes: limits.max_input_bytes - header_size,
+                max_output_bytes: header.size.to_isize(),
+                max_blocks: limits.max_blocks,
+                max_work: limits.max_work,
+            },
+        ).map_err(
+            |error| {
+                if error.kind == compress::ErrorKind::Limit {
+                    Error::LimitExceeded(error.message)
+                } else {
+                    Error::InvalidStructure("compressed section: " + error.to_string())
+                }
+            },
+        )?;
+        if output.len().to_u64() != header.size {
+            return Result::Err(Error::InvalidStructure("uncompressed section size"))
+        }
+        Result::Ok(output)
+    }
+}

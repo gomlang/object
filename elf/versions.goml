@@ -1,0 +1,447 @@
+package elf;
+
+#[derive(PartialEq, Eq)]
+pub struct VersionLimits {
+    pub max_input_bytes: isize,
+    pub max_records: isize,
+    pub max_string_bytes: isize,
+    pub max_total_string_bytes: isize,
+}
+
+impl VersionLimits {
+    pub fn standard() -> VersionLimits {
+        VersionLimits {
+            max_input_bytes: 33554432,
+            max_records: 1000000,
+            max_string_bytes: 4096,
+            max_total_string_bytes: 33554432,
+        }
+    }
+
+    pub fn validate(self: VersionLimits) -> Result[(), Error] {
+        if self.max_input_bytes < 0 || self.max_records < 0 || self.max_string_bytes < 0
+            || self.max_total_string_bytes < 0 {
+            Result::Err(Error::LimitExceeded("negative version limit"))
+        } else {
+            Result::Ok(())
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub struct VersionDefinition {
+    pub index: u16,
+    pub flags: u16,
+    pub hash: u32,
+    pub name: string,
+    pub dependencies: Vec[string],
+}
+
+#[derive(PartialEq, Eq)]
+pub struct VersionDependency {
+    pub index: u16,
+    pub hidden: bool,
+    pub flags: u16,
+    pub hash: u32,
+    pub name: string,
+}
+
+#[derive(PartialEq, Eq)]
+pub struct VersionNeed {
+    pub library: string,
+    pub dependencies: Vec[VersionDependency],
+}
+
+#[derive(PartialEq, Eq)]
+pub struct SymbolVersion {
+    pub symbol_index: isize,
+    pub symbol_table_section: isize,
+    pub index: u16,
+    pub hidden: bool,
+    pub name: Option[string],
+    pub library: Option[string],
+}
+
+struct VersionBudget {
+    limits: VersionLimits,
+    input: Ref[isize],
+    records: Ref[isize],
+    strings: Ref[isize],
+}
+
+impl VersionBudget {
+    fn new(limits: VersionLimits) -> Result[VersionBudget, Error] {
+        limits.validate()?;
+        Result::Ok(
+            VersionBudget {
+                limits,
+                input: Ref::new(limits.max_input_bytes),
+                records: Ref::new(limits.max_records),
+                strings: Ref::new(limits.max_total_string_bytes),
+            },
+        )
+    }
+
+    fn section(self: VersionBudget, section: Section) -> Result[(), Error] {
+        if section.flags & 0x800 != 0 {
+            return Result::Err(Error::InvalidStructure("compressed version metadata"))
+        }
+        if section.size > self.input.get().to_u64() {
+            return Result::Err(Error::LimitExceeded("version input bytes"))
+        }
+        self.input.set(self.input.get() - section.size.to_isize());
+        Result::Ok(())
+    }
+
+    fn charge(self: VersionBudget, count: u64) -> Result[(), Error] {
+        if count > self.records.get().to_u64() {
+            return Result::Err(Error::LimitExceeded("version records"))
+        }
+        self.records.set(self.records.get() - count.to_isize());
+        Result::Ok(())
+    }
+}
+
+fn version_next(at: u64, delta: u64, width: u64, end: u64, last: bool) -> Result[u64, Error] {
+    if last {
+        if delta != 0 {
+            return Result::Err(Error::InvalidStructure("unterminated version chain"))
+        }
+        return Result::Ok(end)
+    }
+    if delta < width || !in_range(end, at, delta) || at + delta == end {
+        return Result::Err(Error::InvalidStructure("version chain offset"))
+    }
+    Result::Ok(at + delta)
+}
+
+impl File {
+    fn version_section(self: File, index: isize, kind: u32) -> Result[Section, Error] {
+        let section = match self.section(index) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidRange("section index")),
+        };
+        if section.kind != kind {
+            return Result::Err(Error::InvalidStructure("version section type"))
+        }
+        Result::Ok(section)
+    }
+
+    fn version_strings(self: File, section: Section) -> Result[Section, Error] {
+        let table = self.version_section(section.link.to_isize(), 3)?;
+        if table.flags & 0x800 != 0 {
+            return Result::Err(Error::InvalidStructure("compressed version string table"))
+        }
+        Result::Ok(table)
+    }
+
+    fn version_name(self: File, table: Section, offset: u64, budget: VersionBudget) -> Result[
+        string,
+        Error,
+    ] {
+        if offset >= table.size {
+            return Result::Err(Error::InvalidName)
+        }
+        let start = table.offset + offset;
+        let mut end = start;
+        while end < table.offset + table.size && self.data.get(end.to_isize()) != 0 {
+            if end - start >= budget.limits.max_string_bytes.to_u64() {
+                return Result::Err(Error::LimitExceeded("version string bytes"))
+            }
+            if end - start >= budget.strings.get().to_u64() {
+                return Result::Err(Error::LimitExceeded("total version string bytes"))
+            }
+            end += 1;
+        }
+        if end == table.offset + table.size {
+            return Result::Err(Error::InvalidName)
+        }
+        let raw = Vec::new();
+        for i in start.to_isize()..end.to_isize() {
+            raw.push(self.data.get(i));
+        }
+        let (valid, name) = string_from_utf8(raw);
+        if !valid {
+            return Result::Err(Error::InvalidName)
+        }
+        budget.strings.set(budget.strings.get() - (end - start).to_isize());
+        Result::Ok(name)
+    }
+
+    fn read_definitions(self: File, section: Section, budget: VersionBudget) -> Result[
+        Vec[VersionDefinition],
+        Error,
+    ] {
+        budget.section(section)?;
+        budget.charge(section.info.to_u64())?;
+        let strings = self.version_strings(section)?;
+        let data = self.data.slice(
+            section.offset.to_isize(),
+            (section.offset + section.size).to_isize(),
+        );
+        let endian = self.header_value.endian;
+        let result = Vec::new();
+        let seen: HashMap[u16, bool] = HashMap::new();
+        let mut at: u64 = 0;
+        if section.info == 0 && section.size != 0 {
+            return Result::Err(Error::InvalidStructure("version record count"))
+        }
+        for i in 0..section.info.to_isize() {
+            if !in_range(section.size, at, 20) {
+                return Result::Err(Error::Truncated)
+            }
+            if read_number(data, at, 2, endian)? != 1 {
+                return Result::Err(Error::InvalidStructure("version definition format"))
+            }
+            let flags = read_number(data, at + 2, 2, endian)?.to_u16();
+            let index = read_number(data, at + 4, 2, endian)?.to_u16();
+            if index == 0 || index >= 0x8000 {
+                return Result::Err(Error::InvalidStructure("version definition index"))
+            }
+            if seen.contains(index) {
+                return Result::Err(Error::InvalidStructure("duplicate version index"))
+            }
+            seen.insert(index, true);
+            let count = read_number(data, at + 6, 2, endian)?;
+            if count == 0 {
+                return Result::Err(Error::InvalidStructure("version definition name"))
+            }
+            budget.charge(count)?;
+            let hash = read_number(data, at + 8, 4, endian)?.to_u32();
+            let end = version_next(
+                at,
+                read_number(data, at + 16, 4, endian)?,
+                20,
+                section.size,
+                i + 1 == section.info.to_isize(),
+            )?;
+            let mut aux = version_next(
+                at,
+                read_number(data, at + 12, 4, endian)?,
+                20,
+                section.size,
+                false,
+            )?;
+            let names = Vec::new();
+            for j in 0..count.to_isize() {
+                if !in_range(section.size, aux, 8) {
+                    return Result::Err(Error::Truncated)
+                }
+                names.push(self.version_name(strings, read_number(data, aux, 4, endian)?, budget)?);
+                aux = version_next(
+                    aux,
+                    read_number(data, aux + 4, 4, endian)?,
+                    8,
+                    section.size,
+                    j + 1 == count.to_isize(),
+                )?;
+            }
+            let dependencies = Vec::new();
+            for j in 1..names.len() {
+                dependencies.push(names[j]);
+            }
+            result.push(VersionDefinition { index, flags, hash, name: names[0], dependencies });
+            at = end;
+        }
+        Result::Ok(result)
+    }
+
+    fn read_needs(self: File, section: Section, budget: VersionBudget) -> Result[
+        Vec[VersionNeed],
+        Error,
+    ] {
+        budget.section(section)?;
+        budget.charge(section.info.to_u64())?;
+        let strings = self.version_strings(section)?;
+        let data = self.data.slice(
+            section.offset.to_isize(),
+            (section.offset + section.size).to_isize(),
+        );
+        let endian = self.header_value.endian;
+        let result = Vec::new();
+        let seen: HashMap[u16, bool] = HashMap::new();
+        let mut at: u64 = 0;
+        if section.info == 0 && section.size != 0 {
+            return Result::Err(Error::InvalidStructure("version record count"))
+        }
+        for i in 0..section.info.to_isize() {
+            if !in_range(section.size, at, 16) {
+                return Result::Err(Error::Truncated)
+            }
+            if read_number(data, at, 2, endian)? != 1 {
+                return Result::Err(Error::InvalidStructure("version need format"))
+            }
+            let count = read_number(data, at + 2, 2, endian)?;
+            budget.charge(count)?;
+            let library = self.version_name(strings, read_number(data, at + 4, 4, endian)?, budget)?;
+            let end = version_next(
+                at,
+                read_number(data, at + 12, 4, endian)?,
+                16,
+                section.size,
+                i + 1 == section.info.to_isize(),
+            )?;
+            let offset = read_number(data, at + 8, 4, endian)?;
+            let dependencies = Vec::new();
+            if count == 0 {
+                if offset != 0 {
+                    return Result::Err(Error::InvalidStructure("empty version need chain"))
+                }
+            } else {
+                let mut aux = version_next(at, offset, 16, section.size, false)?;
+                for j in 0..count.to_isize() {
+                    if !in_range(section.size, aux, 16) {
+                        return Result::Err(Error::Truncated)
+                    }
+                    let hash = read_number(data, aux, 4, endian)?.to_u32();
+                    let flags = read_number(data, aux + 4, 2, endian)?.to_u16();
+                    let raw_index = read_number(data, aux + 6, 2, endian)?.to_u16();
+                    let index = raw_index & 0x7fff;
+                    if index < 2 {
+                        return Result::Err(Error::InvalidStructure("version need index"))
+                    }
+                    if seen.contains(index) {
+                        return Result::Err(Error::InvalidStructure("duplicate version index"))
+                    }
+                    seen.insert(index, true);
+                    let name = self.version_name(
+                        strings,
+                        read_number(data, aux + 8, 4, endian)?,
+                        budget,
+                    )?;
+                    dependencies.push(
+                        VersionDependency {
+                            index,
+                            hidden: raw_index & 0x8000 != 0,
+                            flags,
+                            hash,
+                            name,
+                        },
+                    );
+                    aux = version_next(
+                        aux,
+                        read_number(data, aux + 12, 4, endian)?,
+                        16,
+                        section.size,
+                        j + 1 == count.to_isize(),
+                    )?;
+                }
+            }
+            result.push(VersionNeed { library, dependencies });
+            at = end;
+        }
+        Result::Ok(result)
+    }
+
+    pub fn section_version_definitions(self: File, index: isize, limits: VersionLimits) -> Result[
+        Vec[VersionDefinition],
+        Error,
+    ] {
+        let budget = VersionBudget::new(limits)?;
+        self.read_definitions(self.version_section(index, 0x6ffffffd)?, budget)
+    }
+
+    pub fn section_version_needs(self: File, index: isize, limits: VersionLimits) -> Result[
+        Vec[VersionNeed],
+        Error,
+    ] {
+        let budget = VersionBudget::new(limits)?;
+        self.read_needs(self.version_section(index, 0x6ffffffe)?, budget)
+    }
+
+    pub fn section_symbol_versions(self: File, index: isize, limits: VersionLimits) -> Result[
+        Vec[SymbolVersion],
+        Error,
+    ] {
+        let budget = VersionBudget::new(limits)?;
+        let section = self.version_section(index, 0x6fffffff)?;
+        budget.section(section)?;
+        let symbols = self.version_section(section.link.to_isize(), 11)?;
+        let width = if self.header_value.class == Class::Elf64 {
+            24
+        } else {
+            16
+        };
+        if symbols.entry_size != width || symbols.size % width != 0 || section.entry_size != 2
+            || section.size % 2 != 0
+            || section.size / 2 != symbols.size / width {
+            return Result::Err(Error::InvalidStructure("version symbol count"))
+        }
+        if symbols.flags & 0x800 != 0 {
+            return Result::Err(Error::InvalidStructure("compressed version symbol table"))
+        }
+        budget.charge(section.size / 2)?;
+        let names: HashMap[u16, (string, Option[string])] = HashMap::new();
+        let mut definitions_seen = false;
+        let mut needs_seen = false;
+        for other in self.sections_value.iter() {
+            if other.kind == 0x6fffffff && other.link == section.link && other.index != index {
+                return Result::Err(Error::InvalidStructure("duplicate symbol version table"))
+            }
+            if other.link != symbols.link {
+                continue
+            }
+            if other.kind == 0x6ffffffd {
+                if definitions_seen {
+                    return Result::Err(
+                        Error::InvalidStructure("duplicate version definition table"),
+                    )
+                }
+                definitions_seen = true;
+                for definition in self.read_definitions(other, budget)? {
+                    if names.contains(definition.index) {
+                        return Result::Err(Error::InvalidStructure("duplicate version index"))
+                    }
+                    names.insert(definition.index, (definition.name, Option::None));
+                }
+            } else if other.kind == 0x6ffffffe {
+                if needs_seen {
+                    return Result::Err(Error::InvalidStructure("duplicate version need table"))
+                }
+                needs_seen = true;
+                for need in self.read_needs(other, budget)? {
+                    for dependency in need.dependencies {
+                        if names.contains(dependency.index) {
+                            return Result::Err(Error::InvalidStructure("duplicate version index"))
+                        }
+                        names.insert(
+                            dependency.index,
+                            (dependency.name, Option::Some(need.library)),
+                        );
+                    }
+                }
+            }
+        }
+        let result = Vec::new();
+        for i in 0..(section.size / 2).to_isize() {
+            let raw = read_number(
+                self.data.as_slice(),
+                section.offset + i.to_u64() * 2,
+                2,
+                self.header_value.endian,
+            )?.to_u16();
+            let version_index = raw & 0x7fff;
+            let (name, library) = if version_index < 2 {
+                (Option::None, Option::None)
+            } else {
+                match names.get(version_index) {
+                    Some((name, library)) => (Option::Some(name), library),
+                    None => return Result::Err(
+                        Error::InvalidStructure("unresolved symbol version index"),
+                    ),
+                }
+            };
+            result.push(
+                SymbolVersion {
+                    symbol_index: i,
+                    symbol_table_section: symbols.index,
+                    index: version_index,
+                    hidden: raw & 0x8000 != 0,
+                    name,
+                    library,
+                },
+            );
+        }
+        Result::Ok(result)
+    }
+}

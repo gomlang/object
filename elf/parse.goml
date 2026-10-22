@@ -542,8 +542,21 @@ pub fn parse_with_name_budget(data: Slice[byte], limits: Limits, max_total_name_
             endian,
             index,
         )?;
-        if !in_range(data.len().to_u64(), value.offset, value.file_size) {
+        if value.kind != 0 && !in_range(data.len().to_u64(), value.offset, value.file_size) {
             return Result::Err(Error::InvalidRange("program data"))
+        }
+        if value.kind == 1 {
+            if value.file_size > value.memory_size {
+                return Result::Err(Error::InvalidStructure("load segment size"))
+            }
+            if value.alignment > 1 {
+                if (value.alignment & (value.alignment - 1)) != 0 {
+                    return Result::Err(Error::InvalidStructure("load segment alignment"))
+                }
+                if value.virtual_address % value.alignment != value.offset % value.alignment {
+                    return Result::Err(Error::InvalidStructure("load segment congruence"))
+                }
+            }
         }
         programs.push(value)
     }

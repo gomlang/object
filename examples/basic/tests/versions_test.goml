@@ -1,0 +1,40 @@
+package tests;
+
+use ecosystem::object::examples::basic as example_files;
+use ecosystem::object::elf;
+use std::fs;
+use std::testing;
+
+#[test]
+fn version_metadata_public_consumer() -> () {
+    for bits in["32", "64"] {
+        for order in["le", "be"] {
+            let raw = testing::expect_ok(
+                fs::read_bytes_structured(
+                    example_files::fixture_path("tests/data/versions" + bits + order + ".bin"),
+                ),
+                "fixture",
+            );
+            let file = testing::expect_ok(elf::parse(raw.as_slice()), "parse");
+            let limits = elf::VersionLimits::standard();
+            let defs = testing::expect_ok(
+                file.section_version_definitions(4, limits),
+                "definitions",
+            );
+            testing::assert_eq(defs[1].name, "CUSTOM_2");
+            testing::assert_eq(defs[1].dependencies[0], "BASE_1");
+            let needs = testing::expect_ok(file.section_version_needs(5, limits), "needs");
+            testing::assert_eq(needs[0].library, "libc.so.6");
+            let versions = testing::expect_ok(file.section_symbol_versions(3, limits), "versions");
+            testing::assert_eq(versions.len(), 5);
+            testing::assert_eq(versions[1].symbol_table_section, 2);
+            testing::assert_eq(versions[1].symbol_index, 1);
+            testing::assert_eq(versions[1].index, 2);
+            testing::assert(versions[1].hidden);
+            testing::assert(versions[1].name == Option::Some("CUSTOM_2"));
+            testing::assert(versions[2].library == Option::Some("libc.so.6"));
+            testing::assert(versions[2].name == Option::Some("GLIBC_2.2.5"));
+            testing::assert(versions[0].name == Option::None);
+        }
+    }
+}

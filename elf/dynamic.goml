@@ -1,0 +1,178 @@
+package elf;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DynamicLimits {
+    pub max_input_bytes: isize,
+    pub max_entries: isize,
+    pub max_string_bytes: isize,
+    pub max_total_string_bytes: isize,
+}
+
+impl DynamicLimits {
+    pub fn standard() -> DynamicLimits {
+        DynamicLimits {
+            max_input_bytes: 33554432,
+            max_entries: 1000000,
+            max_string_bytes: 4096,
+            max_total_string_bytes: 33554432,
+        }
+    }
+
+    pub fn validate(self: DynamicLimits) -> Result[(), Error] {
+        if self.max_input_bytes < 0 || self.max_entries < 0 || self.max_string_bytes < 0
+            || self.max_total_string_bytes < 0 {
+            Result::Err(Error::LimitExceeded("negative dynamic limit"))
+        } else {
+            Result::Ok(())
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct DynamicEntry {
+    pub tag: i64,
+    pub value: u64,
+}
+
+fn dynamic_entries(data: Slice[byte], class: Class, endian: Endian, limits: DynamicLimits) -> Result[
+    Vec[DynamicEntry],
+    Error,
+] {
+    limits.validate()?;
+    if data.len() > limits.max_input_bytes {
+        return Result::Err(Error::LimitExceeded("dynamic input bytes"))
+    }
+    let width = if class == Class::Elf64 {
+        8
+    } else {
+        4
+    };
+    if data.len() % (width * 2) != 0 {
+        return Result::Err(Error::InvalidStructure("dynamic entry size"))
+    }
+    let result = Vec::new();
+    for i in 0..data.len() / (width * 2) {
+        let start = (i * width * 2).to_u64();
+        let raw = read_number(data, start, width, endian)?;
+        let tag = if width == 8 {
+            raw.to_i64()
+        } else {
+            raw.to_u32().to_i32().to_i64()
+        };
+        if tag == 0 {
+            return Result::Ok(result)
+        }
+        if result.len() >= limits.max_entries {
+            return Result::Err(Error::LimitExceeded("dynamic entries"))
+        }
+        result.push(
+            DynamicEntry { tag, value: read_number(data, start + width.to_u64(), width, endian)? },
+        );
+    }
+    Result::Err(Error::InvalidStructure("unterminated dynamic table"))
+}
+
+impl File {
+    pub fn section_dynamic(self: File, index: isize, limits: DynamicLimits) -> Result[
+        Vec[DynamicEntry],
+        Error,
+    ] {
+        limits.validate()?;
+        let section = match self.section(index) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidRange("section index")),
+        };
+        if section.kind != 6 {
+            return Result::Err(Error::InvalidStructure("not a dynamic section"))
+        }
+        let entry_size = if self.header_value.class == Class::Elf64 {
+            16
+        } else {
+            8
+        };
+        if section.entry_size != entry_size.to_u64() {
+            return Result::Err(Error::InvalidStructure("dynamic entry size"))
+        }
+        dynamic_entries(
+            self.data.slice(section.offset.to_isize(), (section.offset + section.size).to_isize()),
+            self.header_value.class,
+            self.header_value.endian,
+            limits,
+        )
+    }
+
+    pub fn program_dynamic(self: File, index: isize, limits: DynamicLimits) -> Result[
+        Vec[DynamicEntry],
+        Error,
+    ] {
+        limits.validate()?;
+        if index < 0 || index >= self.programs_value.len() {
+            return Result::Err(Error::InvalidRange("program index"))
+        }
+        let program = self.programs_value.get(index);
+        if program.kind != 2 {
+            return Result::Err(Error::InvalidStructure("not a dynamic program"))
+        }
+        dynamic_entries(
+            self.data.slice(
+                program.offset.to_isize(),
+                (program.offset + program.file_size).to_isize(),
+            ),
+            self.header_value.class,
+            self.header_value.endian,
+            limits,
+        )
+    }
+
+    pub fn section_dynamic_strings(self: File, index: isize, tag: i64, limits: DynamicLimits) -> Result[
+        Vec[string],
+        Error,
+    ] {
+        let entries = self.section_dynamic(index, limits)?;
+        if tag != 1 && tag != 14 && tag != 15 && tag != 29 {
+            return Result::Err(Error::InvalidStructure("not a dynamic string tag"))
+        }
+        let section = self.sections_value.get(index);
+        let table = match self.section(section.link.to_isize()) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidStructure("dynamic string table link")),
+        };
+        if table.kind != 3 {
+            return Result::Err(Error::InvalidStructure("dynamic string table link"))
+        }
+        let result = Vec::new();
+        let mut remaining = limits.max_total_string_bytes;
+        for entry in entries {
+            if entry.tag == tag {
+                if entry.value >= table.size {
+                    return Result::Err(Error::InvalidName)
+                }
+                let start = table.offset + entry.value;
+                let mut end = start;
+                while end < table.offset + table.size && self.data.get(end.to_isize()) != 0 {
+                    if end - start >= limits.max_string_bytes.to_u64() {
+                        return Result::Err(Error::LimitExceeded("dynamic string bytes"))
+                    }
+                    if end - start >= remaining.to_u64() {
+                        return Result::Err(Error::LimitExceeded("total dynamic string bytes"))
+                    }
+                    end += 1;
+                }
+                if end == table.offset + table.size {
+                    return Result::Err(Error::InvalidName)
+                }
+                let raw = Vec::new();
+                for position in start.to_isize()..end.to_isize() {
+                    raw.push(self.data.get(position));
+                }
+                let (valid, value) = string_from_utf8(raw);
+                if !valid {
+                    return Result::Err(Error::InvalidName)
+                }
+                remaining -= (end - start).to_isize();
+                result.push(value);
+            }
+        }
+        Result::Ok(result)
+    }
+}

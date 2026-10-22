@@ -1,0 +1,131 @@
+package elf;
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct RelocationLimits {
+    pub max_input_bytes: isize,
+    pub max_relocations: isize,
+}
+
+impl RelocationLimits {
+    pub fn standard() -> RelocationLimits {
+        RelocationLimits { max_input_bytes: 33554432, max_relocations: 1000000 }
+    }
+
+    pub fn validate(self: RelocationLimits) -> Result[(), Error] {
+        if self.max_input_bytes < 0 || self.max_relocations < 0 {
+            Result::Err(Error::LimitExceeded("negative relocation limit"))
+        } else {
+            Result::Ok(())
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+pub struct Relocation {
+    pub offset: u64,
+    pub symbol_index: u32,
+    pub kind: u32,
+    pub addend: Option[i64],
+    pub symbol_table_section: isize,
+    pub target_section: Option[isize],
+}
+
+impl File {
+    pub fn section_relocations(self: File, index: isize, limits: RelocationLimits) -> Result[
+        Vec[Relocation],
+        Error,
+    ] {
+        limits.validate()?;
+        let section = match self.section(index) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidRange("section index")),
+        };
+        if section.kind != 4 && section.kind != 9 {
+            return Result::Err(Error::InvalidStructure("not a relocation section"))
+        }
+        let wide = self.header_value.class == Class::Elf64;
+        let width = if wide {
+            8
+        } else {
+            4
+        };
+        let entry_size = width
+            * if section.kind == 4 {
+                3
+            } else {
+                2
+            };
+        if section.entry_size != entry_size.to_u64() || section.size % section.entry_size != 0 {
+            return Result::Err(Error::InvalidStructure("relocation entry size"))
+        }
+        if section.size > limits.max_input_bytes.to_u64() {
+            return Result::Err(Error::LimitExceeded("relocation input bytes"))
+        }
+        let count = section.size / section.entry_size;
+        if count > limits.max_relocations.to_u64() {
+            return Result::Err(Error::LimitExceeded("relocations"))
+        }
+        let symbols = match self.section(section.link.to_isize()) {
+            Some(value) => value,
+            None => return Result::Err(Error::InvalidStructure("relocation symbol table link")),
+        };
+        if symbols.kind != 2 && symbols.kind != 11 {
+            return Result::Err(Error::InvalidStructure("relocation symbol table link"))
+        }
+        if section.info.to_u64() >= self.sections_value.len().to_u64() {
+            return Result::Err(Error::InvalidStructure("relocation target section"))
+        }
+        let target_section = if section.info == 0 {
+            Option::None
+        } else {
+            Option::Some(section.info.to_isize())
+        };
+        let symbol_count = symbols.size / symbols.entry_size;
+        let result = Vec::with_capacity(count.to_isize());
+        let data = self.data.as_slice();
+        let endian = self.header_value.endian;
+        for record in 0..count.to_isize() {
+            let start = section.offset + record.to_u64() * section.entry_size;
+            let offset = read_number(data, start, width, endian)?;
+            let info = read_number(data, start + width.to_u64(), width, endian)?;
+            let symbol_index = (info
+                >> if wide {
+                    32
+                } else {
+                    8
+                }).to_u32();
+            let kind = (info
+                & if wide {
+                    0xffffffff
+                } else {
+                    0xff
+                }).to_u32();
+            if symbol_index.to_u64() >= symbol_count {
+                return Result::Err(Error::InvalidStructure("relocation symbol index"))
+            }
+            let addend = if section.kind == 4 {
+                let raw = read_number(data, start + (width * 2).to_u64(), width, endian)?;
+                Option::Some(
+                    if wide {
+                        raw.to_i64()
+                    } else {
+                        raw.to_u32().to_i32().to_i64()
+                    },
+                )
+            } else {
+                Option::None
+            };
+            result.push(
+                Relocation {
+                    offset,
+                    symbol_index,
+                    kind,
+                    addend,
+                    symbol_table_section: symbols.index,
+                    target_section,
+                },
+            );
+        }
+        Result::Ok(result)
+    }
+}

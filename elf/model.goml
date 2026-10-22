@@ -14,33 +14,26 @@ pub enum Endian {
     Big,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, ToString)]
 pub enum Error {
+    #[to_string("invalid ELF magic")]
     InvalidMagic,
+    #[to_string("unsupported ELF class")]
     UnsupportedClass,
+    #[to_string("unsupported ELF byte order")]
     UnsupportedEndian,
+    #[to_string("unsupported ELF version")]
     UnsupportedVersion,
+    #[to_string("truncated ELF data")]
     Truncated,
+    #[to_string("invalid ELF range: {0}")]
     InvalidRange(string),
+    #[to_string("invalid ELF structure: {0}")]
     InvalidStructure(string),
+    #[to_string("invalid ELF name string")]
     InvalidName,
+    #[to_string("ELF resource limit exceeded: {0}")]
     LimitExceeded(string),
-}
-
-impl ToString for Error {
-    fn to_string(self: Error) -> string {
-        match self {
-            Error::InvalidMagic => "invalid ELF magic",
-            Error::UnsupportedClass => "unsupported ELF class",
-            Error::UnsupportedEndian => "unsupported ELF byte order",
-            Error::UnsupportedVersion => "unsupported ELF version",
-            Error::Truncated => "truncated ELF data",
-            Error::InvalidRange(kind) => "invalid ELF range: " + kind,
-            Error::InvalidStructure(kind) => "invalid ELF structure: " + kind,
-            Error::InvalidName => "invalid ELF name string",
-            Error::LimitExceeded(kind) => "ELF resource limit exceeded: " + kind,
-        }
-    }
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -194,6 +187,9 @@ impl File {
             return Result::Err(Error::InvalidRange("program index"))
         }
         let program = self.programs_value.get(index);
+        if program.kind == 0 {
+            return Result::Ok(bytes::Bytes::new())
+        }
         let start = program.offset.to_isize();
         let end = start + program.file_size.to_isize();
         Result::Ok(bytes::Bytes::from_slice_copy(self.data.slice(start, end)))
