@@ -22,6 +22,11 @@ and provide exactly one entry per symbol. Duplicate companions, nonzero unused
 entries, and escaped indexes outside the section table return `InvalidStructure`.
 These checks follow the [ELF section-table specification](https://gabi.xinuos.com/elf/03-sheader.html).
 Downstream regressions cover ELF32/ELF64 in both byte orders.
+Ordinary symbol section indexes must also fit the section table. Undefined
+symbols and reserved indexes such as `SHN_ABS` and `SHN_COMMON` retain their
+special meanings; they are not interpreted as ordinary section indexes. These
+checks apply to both static and dynamic symbol tables, following the
+[ELF symbol-table specification](https://gabi.xinuos.com/elf/05-symtab.html).
 
 Decoded section and symbol names share a cumulative UTF-8 byte budget. Every
 produced name is charged, including repeated references to the same string-table

@@ -322,3 +322,20 @@ fn section_and_symbol_names_share_a_total_budget() -> () {
         Error::LimitExceeded("total name bytes"),
     );
 }
+
+#[test]
+fn ordinary_symbol_section_index_cannot_escape_section_table() -> () {
+    let data = fixture();
+    let file = testing::expect_ok(elf::parse(data.as_slice()), "symbol index fixture");
+    let table = testing::expect_some(file.section_by_name(".symtab"), "symbol table");
+    set_number(
+        data,
+        (table.offset + table.entry_size + 6).to_isize(),
+        file.header().section_count.to_u64(),
+        2,
+    );
+    testing::assert_eq(
+        testing::expect_err(elf::parse(data.as_slice()), "out-of-range symbol section"),
+        Error::InvalidStructure("symbol section index"),
+    );
+}

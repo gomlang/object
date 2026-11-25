@@ -238,3 +238,56 @@ fn extended_symbol_tables_validate_links_layout_and_correspondence() -> () {
         }
     }
 }
+
+#[test]
+fn ordinary_symbol_indexes_require_sections_but_preserve_special_values() -> () {
+    for wide in Vec::from_array([false, true]) {
+        for big in Vec::from_array([false, true]) {
+            for dynamic in Vec::from_array([false, true]) {
+                let data = extended_fixture(wide, big);
+                let section_size = if wide {
+                    64
+                } else {
+                    40
+                };
+                let symbol_size = if wide {
+                    24
+                } else {
+                    16
+                };
+                let symbol_index_at = 432 + 2 * symbol_size
+                    + if wide {
+                        6
+                    } else {
+                        14
+                    };
+                if dynamic {
+                    put(data, 64 + 3 * section_size + 4, 11, 4, big);
+                }
+                for index in Vec::from_array([5, 65279]) {
+                    put(data, symbol_index_at, index.to_u64(), 2, big);
+                    testing::assert_eq(
+                        testing::expect_err(
+                            elf::parse(data.as_slice()),
+                            "ordinary section index outside table",
+                        ),
+                        elf::Error::InvalidStructure("symbol section index"),
+                    );
+                }
+                for index in Vec::from_array([0, 1, 4, 65280, 65521, 65522, 65534]) {
+                    put(data, symbol_index_at, index.to_u64(), 2, big);
+                    let parsed = testing::expect_ok(
+                        elf::parse(data.as_slice()),
+                        "ordinary or special section index",
+                    );
+                    let symbols = if dynamic {
+                        parsed.dynamic_symbols()
+                    } else {
+                        parsed.symbols()
+                    };
+                    testing::assert_eq(symbols[1].section_index, index.to_u32());
+                }
+            }
+        }
+    }
+}

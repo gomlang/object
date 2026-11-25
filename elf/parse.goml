@@ -298,6 +298,9 @@ fn parse_symbols(
                 if extended_index != 0 {
                     return Result::Err(Error::InvalidStructure("unused extended symbol index"))
                 }
+                if short_index < 65280 && short_index.to_isize() >= sections.len() {
+                    return Result::Err(Error::InvalidStructure("symbol section index"))
+                }
                 short_index
             };
             let symbol = Symbol {
